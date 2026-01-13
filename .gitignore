@@ -1,5 +1,6 @@
 logs/
 config/local_llm.yaml
+config/optimize_config.yaml
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
