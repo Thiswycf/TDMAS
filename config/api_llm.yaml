@@ -1,0 +1,15 @@
+models:
+ "gpt-4o-mini": # put your model name here
+   api_type: "openai"
+   base_url: "https://api.openai.com/v1"
+   api_key: "<API_KEY>"
+   temperature: 0
+CALC_USAGE: True
+
+llm:
+  api_type: "openai"
+  base_url: "https://api.openai.com/v1"
+  api_key: "<API_KEY>"
+  model: "gpt-4o-mini"
+
+

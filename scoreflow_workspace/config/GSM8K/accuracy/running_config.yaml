@@ -1,0 +1,25 @@
+# running configuration
+
+# general
+dataset: GSM8K # dataset in datasets/
+task_type: full_pipeline # full_pipeline, infer_only, train_only
+start_epoch: 0 # start epoch
+end_epoch: 3 # end epoch
+ask_num: 8 # Number of repeated asks
+max_depth: 5 # max depth of the problem
+max_concurrent: 512 # max concurrent requests to the LLM
+
+# model
+model_name: Qwen3-8B # model name in config/local_llm.yaml
+max_input_tokens: 8192 # tokens
+max_output_tokens: 1024 # tokens
+# declared_GPU_memory_usage: 38.8 # GB
+declared_GPU_memory_usage: 24.0 # GB
+temperature: 0.2 # temperature： 0.2/0.6/0.9
+
+# train
+similarity_threshold: 0.8 # similarity threshold for preference pairs
+preference_pairs_limit: 128 # preference pairs per epoch
+
+# test
+limit: 128 # limit samples to rapid test

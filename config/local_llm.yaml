@@ -1,0 +1,36 @@
+# default_llm: Qwen3-4B-Instruct-2507
+default_llm: Qwen3-8B
+# default_llm: Qwen2.5-14B-Instruct
+
+models:
+  Qwen3-4B-Instruct-2507:
+    model_path: /data2/lqz25zhjData/models/Qwen3-4B-Instruct-2507
+    max_model_len: 16384 # less than 256K (262,144)
+    gpu_memory_utilization: 0.8
+
+  Qwen2.5-7B-Instruct:
+    model_path: /data2/lqz25zhjData/models/Qwen2.5-7B-Instruct
+    max_model_len: 16384 # less than 128K (131,072)
+    gpu_memory_utilization: 0.9
+
+  Llama-3.1-8B-Instruct:
+    model_path: /data2/lqz25zhjData/models/Llama-3.1-8B-Instruct
+    max_model_len: 16384 # less than 128K (131,072)
+    gpu_memory_utilization: 0.9
+
+  Qwen3-8B:
+    model_path: /data2/lqz25zhjData/models/Qwen3-8B
+    max_model_len: 16384 # less than 128K (131,072)
+    # max_model_len: 40960 # less than 128K (131,072)
+    gpu_memory_utilization: 0.9
+
+  # Qwen3-30B-A3B-Instruct-2507:
+  #   model_path: /data2/lqz25zhjData/models/Qwen3-30B-A3B-Instruct-2507
+  #   max_model_len: 32768 # less than 256K (262,144)
+  #   gpu_memory_utilization: 0.9
+
+  Qwen2.5-14B-Instruct:
+    model_path: /data2/lqz25zhjData/models/Qwen2.5-14B-Instruct
+    max_model_len: 16384 # less than 128K (131,072)
+    gpu_memory_utilization: 0.9
+temperature: 0.2

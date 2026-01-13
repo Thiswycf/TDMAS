@@ -1,0 +1,226 @@
+[
+    {
+        "question": "Jasper will serve charcuterie at his dinner party. He buys 2 pounds of cheddar cheese for $10, a pound of cream cheese that cost half the price of the cheddar cheese, and a pack of cold cuts that cost twice the price of the cheddar cheese. How much does he spend on the ingredients?",
+        "right_answer": 35.0,
+        "model_output": "32.5",
+        "extracted_output": 32.5,
+        "extract_answer_code": "None"
+    },
+    {
+        "question": "Every hour Joanne has to collect the coins out of the fountain inside the mall. During the first hour, she collected 15 coins. For the next two hours, she collected 35 coins from the fountain. In the fourth hour, she collected 50 coins from the fountain but she gave 15 of them to her coworker so she could buy a soda. How many coins did she have after the fourth hour?",
+        "right_answer": 120.0,
+        "model_output": "85",
+        "extracted_output": 85.0,
+        "extract_answer_code": "None"
+    },
+    {
+        "question": "Henry took 9 pills a day for 14 days. Of these 9 pills, 4 pills cost $1.50 each, and the other pills each cost $5.50 more. How much did he spend in total on the pills?",
+        "right_answer": 41.0,
+        "model_output": "574.0",
+        "extracted_output": 574.0,
+        "extract_answer_code": "None"
+    },
+    {
+        "question": "Jeanette is practicing her juggling. Each week she can juggle 2 more objects than the week before. If she starts out juggling 3 objects and practices for 5 weeks, how many objects can she juggle?",
+        "right_answer": 13.0,
+        "model_output": "11",
+        "extracted_output": 11.0,
+        "extract_answer_code": "None"
+    },
+    {
+        "question": "George bought some food for his trip: a bottle of juice, a sandwich, and a bottle of milk. The sandwich was for $4, and the juice was two times more expensive. The bottle of milk cost was 75% of the total cost of the sandwich and juice. How much did George pay for his food?",
+        "right_answer": 21.0,
+        "model_output": "28.0",
+        "extracted_output": 28.0,
+        "extract_answer_code": "None"
+    },
+    {
+        "question": "Janet filmed a new movie that is 60% longer than her previous 2-hour long movie.  Her previous movie cost $50 per minute to film, and the newest movie cost twice as much per minute to film as the previous movie.  What was the total amount of money required to film Janet's entire newest film?",
+        "right_answer": 1920.0,
+        "model_output": "19200",
+        "extracted_output": 19200.0,
+        "extract_answer_code": "None"
+    },
+    {
+        "question": "Ravi has some coins. He has 2 more quarters than nickels and 4 more dimes than quarters. If he has 6 nickels, how much money does he have?",
+        "right_answer": 350.0,
+        "model_output": "3.5",
+        "extracted_output": 3.5,
+        "extract_answer_code": "None"
+    },
+    {
+        "question": "A company has 200 employees.  60% of the employees drive to work.  Of the employees who don't drive to work, half take public transportation. How many more employees drive to work than take public transportation?",
+        "right_answer": 40.0,
+        "model_output": "80",
+        "extracted_output": 80.0,
+        "extract_answer_code": "None"
+    },
+    {
+        "question": "Jan buys 1000 feet of cable.  She splits it up into 25-foot sections.  She gives 1/4 of that to a friend.  She then puts half of the rest in storage. How much does she keep on hand?",
+        "right_answer": 15.0,
+        "model_output": "375.0",
+        "extracted_output": 375.0,
+        "extract_answer_code": "None"
+    },
+    {
+        "question": "An Italian restaurant earns $600 every weekday and twice as much on the weekend. How much money does it earn by the end of the month?",
+        "right_answer": 21600.0,
+        "model_output": "22800",
+        "extracted_output": 22800.0,
+        "extract_answer_code": "None"
+    },
+    {
+        "question": "Riku has 25 times more stickers than Kristoff. If Kristoff has 85 stickers, how many stickers does Riku have?",
+        "right_answer": 2210.0,
+        "model_output": "2125",
+        "extracted_output": 2125.0,
+        "extract_answer_code": "None"
+    },
+    {
+        "question": "John decides to get gym memberships so he can get in shape.  The gym close to his house is close but doesn't have everything he wants so he gets two different gym memberships.  The cheap one costs $10 a month and has a sign-up fee of $50.  The second gym is 3 times more expensive and it has a sign-up fee of 4 months membership.  How much total did he pay in the first year for gym membership?",
+        "right_answer": 650.0,
+        "model_output": "810",
+        "extracted_output": 810.0,
+        "extract_answer_code": "None"
+    },
+    {
+        "question": "Five months ago, Mike earned 10 times more money than Fred. If his salary has increased by 40 percent now, and Fred's salary then was $1000, calculate Mike's salary now.",
+        "right_answer": 15400.0,
+        "model_output": "14000.0",
+        "extracted_output": 14000.0,
+        "extract_answer_code": "None"
+    },
+    {
+        "question": "Eve wants to buy her 3 nieces cooking gear that's made for kids.  The hand mitts cost $14.00 and the apron is $16.00.  A set of 3 cooking utensils is $10.00 and a small knife is twice the amount of the utensils.  The store is offering a 25% off sale on all cooking gear.  How much will Eve spend on the gifts?",
+        "right_answer": 135.0,
+        "model_output": "45.0",
+        "extracted_output": 45.0,
+        "extract_answer_code": "None"
+    },
+    {
+        "question": "Students at Highridge High earn 2 points for each correct answer during a quiz bowl If a student correctly answers all the questions in a round, the student is awarded an additional 4 point bonus. They played a total of five rounds each consisting of five questions. If James only missed one question, how many points did he get?",
+        "right_answer": 66.0,
+        "model_output": "64",
+        "extracted_output": 64.0,
+        "extract_answer_code": "None"
+    },
+    {
+        "question": "Sam works at the Widget Factory, assembling Widgets. He can assemble 1 widget every 10 minutes. Jack from the loading dock can help assemble widgets when he doesn't have anything else to do. When he helps, they put together 2 complete widgets every 15 minutes. Recently the factory hired Tony to help assemble widgets. Being new to the job, he doesn't work as fast as Sam or Jack. Yesterday Sam worked for 6 hours before he had to leave work early for a dentist appointment. Jack was able to help out for 4 hours before he had to go back to the loading dock to unload a new shipment of widget materials. Tony worked the entire 8-hour shift. At the end of the day, they had completed 68 widgets. How long does it take Tony to assemble a Widget, in minutes?",
+        "right_answer": 30.0,
+        "model_output": "20.0",
+        "extracted_output": 20.0,
+        "extract_answer_code": "None"
+    },
+    {
+        "question": "A new movie gets released and makes $120 million in the box office for its opening weekend.  It ends up making 3.5 times that much during its entire run.  If the production company gets to keep 60%, how much profit did they make if the movie cost $60 million to produce?",
+        "right_answer": 192000000.0,
+        "model_output": "192.0",
+        "extracted_output": 192.0,
+        "extract_answer_code": "None"
+    },
+    {
+        "question": "Every hour Joanne has to collect the coins out of the fountain inside the mall. During the first hour, she collected 15 coins. For the next two hours, she collected 35 coins from the fountain. In the fourth hour, she collected 50 coins from the fountain but she gave 15 of them to her coworker so she could buy a soda. How many coins did she have after the fourth hour?",
+        "right_answer": 120.0,
+        "model_output": "85",
+        "extracted_output": 85.0,
+        "extract_answer_code": "None"
+    },
+    {
+        "question": "Four people lost a total of 103 kilograms of weight. The first person lost 27 kilograms. The second person lost 7 kilograms less than the first person. The two remaining people lost the same amount. How many kilograms did each of the last two people lose?",
+        "right_answer": 28.0,
+        "model_output": "Code execution timed out",
+        "extracted_output": null,
+        "extract_answer_code": "None"
+    },
+    {
+        "question": "Nancy is filling an aquarium for her fish. She fills it halfway and goes to answer the door. While she's gone, her cat knocks the aquarium over and spills half the water in it. Then Nancy comes back and triples the amount of water in the aquarium. If the aquarium is 4 feet long, 6 feet wide, and 3 feet high, how many cubic feet of water are in the aquarium?",
+        "right_answer": 54.0,
+        "model_output": "Code execution timed out",
+        "extracted_output": null,
+        "extract_answer_code": "None"
+    },
+    {
+        "question": "Dale and Andrew had breakfast at a cafe. A slice of toast costs £1, and eggs cost £3 each. Dale had 2 slices of toast and 2 eggs. Andrew had 1 slice of toast and 2 eggs. How much did their breakfast cost?",
+        "right_answer": 15.0,
+        "model_output": "Code execution timed out",
+        "extracted_output": null,
+        "extract_answer_code": "None"
+    },
+    {
+        "question": "It is Roger’s turn to provide a snack for the baseball team after the game and he has decided to bring trail mix. The trail mix comes in packs of 6 individual pouches. Roger has 13 members on his baseball team, plus 3 coaches and 2 helpers. How many packs of trail mix does he need to buy?",
+        "right_answer": 3.0,
+        "model_output": "Code execution timed out",
+        "extracted_output": null,
+        "extract_answer_code": "None"
+    },
+    {
+        "question": "Henry took 9 pills a day for 14 days. Of these 9 pills, 4 pills cost $1.50 each, and the other pills each cost $5.50 more. How much did he spend in total on the pills?",
+        "right_answer": 41.0,
+        "model_output": "574.0",
+        "extracted_output": 574.0,
+        "extract_answer_code": "None"
+    },
+    {
+        "question": "Jeanette is practicing her juggling. Each week she can juggle 2 more objects than the week before. If she starts out juggling 3 objects and practices for 5 weeks, how many objects can she juggle?",
+        "right_answer": 13.0,
+        "model_output": "11",
+        "extracted_output": 11.0,
+        "extract_answer_code": "None"
+    },
+    {
+        "question": "Jasper will serve charcuterie at his dinner party. He buys 2 pounds of cheddar cheese for $10, a pound of cream cheese that cost half the price of the cheddar cheese, and a pack of cold cuts that cost twice the price of the cheddar cheese. How much does he spend on the ingredients?",
+        "right_answer": 35.0,
+        "model_output": "32.5",
+        "extracted_output": 32.5,
+        "extract_answer_code": "None"
+    },
+    {
+        "question": "Every hour Joanne has to collect the coins out of the fountain inside the mall. During the first hour, she collected 15 coins. For the next two hours, she collected 35 coins from the fountain. In the fourth hour, she collected 50 coins from the fountain but she gave 15 of them to her coworker so she could buy a soda. How many coins did she have after the fourth hour?",
+        "right_answer": 120.0,
+        "model_output": "85",
+        "extracted_output": 85.0,
+        "extract_answer_code": "None"
+    },
+    {
+        "question": "Jasper will serve charcuterie at his dinner party. He buys 2 pounds of cheddar cheese for $10, a pound of cream cheese that cost half the price of the cheddar cheese, and a pack of cold cuts that cost twice the price of the cheddar cheese. How much does he spend on the ingredients?",
+        "right_answer": 35.0,
+        "model_output": "32.5",
+        "extracted_output": 32.5,
+        "extract_answer_code": "None"
+    },
+    {
+        "question": "Jasper will serve charcuterie at his dinner party. He buys 2 pounds of cheddar cheese for $10, a pound of cream cheese that cost half the price of the cheddar cheese, and a pack of cold cuts that cost twice the price of the cheddar cheese. How much does he spend on the ingredients?",
+        "right_answer": 35.0,
+        "model_output": "32.5",
+        "extracted_output": 32.5,
+        "extract_answer_code": "None"
+    },
+    {
+        "question": "Every hour Joanne has to collect the coins out of the fountain inside the mall. During the first hour, she collected 15 coins. For the next two hours, she collected 35 coins from the fountain. In the fourth hour, she collected 50 coins from the fountain but she gave 15 of them to her coworker so she could buy a soda. How many coins did she have after the fourth hour?",
+        "right_answer": 120.0,
+        "model_output": "85",
+        "extracted_output": 85.0,
+        "extract_answer_code": "None"
+    },
+    {
+        "question": "Shawna's workout goal is 30 situps. On Monday, Shawna was only able to do 12 situps, so she decided that she would make up for the rest on Tuesday. However, she was only able to do 19 situps on Tuesday. How many situps would Shawna have to do on Wednesday to meet her minimum goal and make up for the ones she didn't do?",
+        "right_answer": 59.0,
+        "model_output": "0",
+        "extracted_output": 0.0,
+        "extract_answer_code": "None"
+    },
+    {
+        "question": "Jasper will serve charcuterie at his dinner party. He buys 2 pounds of cheddar cheese for $10, a pound of cream cheese that cost half the price of the cheddar cheese, and a pack of cold cuts that cost twice the price of the cheddar cheese. How much does he spend on the ingredients?",
+        "right_answer": 35.0,
+        "model_output": "32.5",
+        "extracted_output": 32.5,
+        "extract_answer_code": "None"
+    },
+    {
+        "question": "Every hour Joanne has to collect the coins out of the fountain inside the mall. During the first hour, she collected 15 coins. For the next two hours, she collected 35 coins from the fountain. In the fourth hour, she collected 50 coins from the fountain but she gave 15 of them to her coworker so she could buy a soda. How many coins did she have after the fourth hour?",
+        "right_answer": 120.0,
+        "model_output": "85",
+        "extracted_output": 85.0,
+        "extract_answer_code": "None"
+    }
+]

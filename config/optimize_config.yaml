@@ -1,0 +1,4 @@
+# optimize configuration
+# 这个文件应该被复制为 optimize_config.yaml 并根据实际情况修改
+
+model_path: /data2/lqz25zhjData/models/Qwen3-8B  # 基础模型路径，应该与local_llm.yaml中的模型路径一致
