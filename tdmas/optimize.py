@@ -5,16 +5,17 @@
 
 import torch
 import argparse
-import os
+import os, sys
 import pickle
 import random
 import yaml
 from datasets import Dataset
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from ScoreFlow.DPOtrainer import DPOTrainer
 from ScoreFlow.DPOconfig import DPOConfig
 from peft import LoraConfig, get_peft_model, PeftModel
 from transformers import AutoModelForCausalLM, AutoTokenizer
-import traceback
 from utils.llm_manager import LLMManager
 import shutil
 from metagpt.logs import logger
@@ -91,12 +92,13 @@ def training(epoch, optimize_config, zcp, data_set):
 
     dpo_args = DPOConfig(
         output_dir=finetuned_epoch_dir(data_set, zcp, next_epoch),
-        logging_steps=10,
+        logging_steps=2,
         save_steps=140000,
         per_device_train_batch_size=1,
         per_device_eval_batch_size=1,
         num_train_epochs=1,
-        use_score=True
+        use_score=True,
+        max_grad_norm=1e-6
     )
 
     if tokenizer.pad_token is None:
@@ -163,8 +165,8 @@ def main():
     """CLI入口点"""
     parser = argparse.ArgumentParser(
         description="Process command-line arguments")
-    parser.add_argument("--dataset", type=str,
-                        required=True, help="Value for Dataset")
+    parser.add_argument("--dataset", type=str, default="GSM8K",
+                        help="Value for Dataset")
     parser.add_argument("--epoch", type=str, default="0",
                         help="Value for Epoch")
     parser.add_argument("--zcp", type=str, default="accuracy",

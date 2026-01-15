@@ -30,11 +30,17 @@ class AIME24Benchmark(BaseBenchmark):
         return candidate
 
     def calculate_score(self, expected_output: str, prediction: str) -> Tuple[float, str]:
-        expected = self._normalize_answer(expected_output)
-        predicted = self._normalize_answer(prediction)
-        if expected is None or predicted is None:
-            return 0.0, predicted
-        return (1.0 if expected == predicted else 0.0), predicted
+        try:
+            expected = self._normalize_answer(expected_output)
+            predicted = self._normalize_answer(prediction)
+            if expected is None or predicted is None:
+                return 0.0, predicted
+            return (1.0 if abs(float(expected) - float(predicted)) < 1e-6 else 0.0), predicted
+        except Exception as e:
+            import traceback
+            logger.warning(f"计算得分时出错: {type(e).__name__}\n{traceback.format_exc()}")
+            logger.warning(f"expected_output: {expected_output}, prediction: {prediction}")
+            return 0.0, prediction
 
     @retry(
         stop=stop_after_attempt(10),
@@ -60,6 +66,9 @@ class AIME24Benchmark(BaseBenchmark):
 
     def get_problem_id(self, problem):
         return problem.get("id", "")
+
+    def direct_judge(self, predicted, problem):
+        return self.calculate_score(problem["final_answer"], predicted)[0]
 
     async def evaluate_problem(
         self,

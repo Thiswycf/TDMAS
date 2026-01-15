@@ -3,52 +3,46 @@
 计算正确性损失、一致性损失和token损失
 """
 
-from typing import Any, List, Optional
+from typing import List, Optional
 from metagpt.logs import logger
+import asyncio
 
-
-def calculate_correctness_loss(answer: str, ground_truth: Any, benchmark, problem: dict) -> float:
+async def calculate_correctness_loss(answer: str, benchmark, problem: dict) -> float:
     """计算正确性损失
     
     Args:
         answer: MAS的回答
-        ground_truth: 正确答案
         benchmark: 基准测试对象
         problem: 问题字典
     
     Returns:
         正确性损失值（0-1之间，1表示完全错误，0表示完全正确）
     """
-    if ground_truth is None:
-        # 如果没有ground truth，返回0（不计算正确性损失）
-        return 0.0
     
     try:
         # 使用benchmark的方法计算得分
         # 这里假设benchmark有evaluate_problem方法或类似的方法
-        if hasattr(benchmark, 'calculate_score'):
-            # 提取答案中的数字（对于GSM8K等数值答案问题）
-            if hasattr(benchmark, 'extract_number'):
-                predicted = benchmark.extract_number(answer)
-                expected = benchmark.extract_number(str(ground_truth)) if isinstance(ground_truth, str) else ground_truth
-                
-                if predicted is not None and expected is not None:
-                    score, _ = benchmark.calculate_score(expected, predicted)
-                    # 损失 = 1 - 得分（得分越高，损失越小）
-                    return 1.0 - score
+        if hasattr(benchmark, 'direct_judge'):
+            import inspect
+            if inspect.iscoroutinefunction(benchmark.direct_judge):
+                score = await benchmark.direct_judge(answer, problem)
+            else:
+                score = benchmark.direct_judge(answer, problem)
+            # 损失 = 1 - 得分（得分越高，损失越小）
+            return 1.0 - score
         else:
-            # 如果没有calculate_score方法，使用简单的字符串比较
-            answer_str = str(answer).strip().lower()
+            # 如果没有direct_judge方法，使用简单的字符串比较
+            ground_truth = problem.get('answer', '')
             gt_str = str(ground_truth).strip().lower()
+            answer_str = str(answer).strip().lower()
             if answer_str == gt_str:
                 return 0.0
             else:
                 return 1.0
     except Exception as e:
-        logger.warning(f"计算正确性损失时出错: {e}")
+        import traceback
+        logger.warning(f"计算正确性损失时出错: {type(e).__name__}\n{traceback.format_exc()}")
         return 1.0  # 出错时返回最大损失
-    
-    return 1.0
 
 
 def calculate_consistency_loss(all_scores: List[int]) -> float:
@@ -90,9 +84,8 @@ def calculate_token_loss(total_tokens: int, token_weight: float = 1e-6) -> float
     return total_tokens * token_weight
 
 
-def calculate_loss(
+async def calculate_loss(
     answer: str,
-    ground_truth: Any,
     all_scores: List[int],
     total_tokens: int,
     benchmark,
@@ -109,7 +102,6 @@ def calculate_loss(
     
     Args:
         answer: MAS的回答
-        ground_truth: 正确答案
         all_scores: 所有打分的列表
         total_tokens: 总token数
         benchmark: 基准测试对象
@@ -121,7 +113,7 @@ def calculate_loss(
     Returns:
         包含各项损失的字典
     """
-    correctness_loss = calculate_correctness_loss(answer, ground_truth, benchmark, problem)
+    correctness_loss = await calculate_correctness_loss(answer, benchmark, problem)
     consistency_loss = calculate_consistency_loss(all_scores)
     token_loss = calculate_token_loss(total_tokens, token_weight)
     

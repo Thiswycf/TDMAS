@@ -111,7 +111,9 @@ _FINETUNED_NAME_PATTERN = re.compile(
 )
 
 
-def build_finetuned_model_name(base_model_name: str, data_set: str, zcp: str, epoch: int | str) -> str:
+def build_model_name(base_model_name: str, data_set: str, zcp: str, epoch: int | str) -> str:
+    if epoch == 0:
+        return base_model_name
     return f"{base_model_name}_finetuned_DATASET{data_set}_ZCP{zcp}_EPOCH{epoch}"
 
 

@@ -21,7 +21,7 @@ from utils.llm_manager import get_global_llm_manager
 from utils.path_utils import (
     ensure_dir,
     workspace_path,
-    build_finetuned_model_name,
+    build_model_name,
     evaluation_output_dir,
     solve_rate_file,
 )
@@ -29,7 +29,6 @@ import ScoreFlow.params
 from tdmas.data_collector import DataCollector
 from tdmas.preference_data import generate_preference_pairs, save_preference_data
 from tdmas.evaluator import Evaluator
-from tdmas.trainer import run_optimize
 
 
 def load_config(config_path: str = "config/running_config.yaml") -> dict:
@@ -85,33 +84,31 @@ async def collect_training_data(
     epoch: int,
     limit: Optional[int] = None,
     max_depth: int = 5,
-    max_concurrent: int = 10,
-    ask_num: int = 8,
+    max_concurrent_request: int = 10,
+    max_concurrent_execute_code: int = 128,
+    train_ask_num: int = 8,
+    max_loop: int = 5,
     zcp: str = "accuracy"
 ):
     """收集训练数据"""
     cprint(
-        f"[TDMAS] 开始收集训练数据 | Epoch {epoch} | Dataset {dataset} | Ask Num {ask_num}", color="blue")
+        f"[TDMAS] 开始收集训练数据 | Epoch {epoch} | Dataset {dataset} | Train Ask Num {train_ask_num}", color="blue")
 
     # 限制数据量
     if limit is not None:
         training_data = training_data[:limit]
 
-    # 为每个entry分配唯一问题id（递增）
-    next_auto_id = 0
-    for entry in training_data:
-        entry['id'] = f"auto_{next_auto_id}"
-        next_auto_id += 1
-
     # 创建数据收集器
     collector = DataCollector(model_name, dataset, benchmark)
 
-    # 收集数据（对每个问题重复询问 ask_num 次）
+    # 收集数据（对每个问题重复询问 train_ask_num 次）
     collected_data = await collector.collect_batch(
         training_data,
         max_depth=max_depth,
-        max_concurrent=max_concurrent,
-        ask_num=ask_num
+        max_concurrent_request=max_concurrent_request,
+        max_concurrent_execute_code=max_concurrent_execute_code,
+        train_ask_num=train_ask_num,
+        max_loop=max_loop
     )
 
     cprint(
@@ -123,34 +120,11 @@ async def collect_training_data(
     total_count = 0
 
     # 按问题分组统计（每个问题有ask_num个回答，只统计第一个回答的准确率）
-    problem_ids_seen = set()
     for data in collected_data:
-        problem_id = data.get('problem_id')
-        if problem_id not in problem_ids_seen:
-            problem_ids_seen.add(problem_id)
-            problem = data.get('problem', {})
-            answer = data.get('answer', '')
-            ground_truth = problem.get('answer', '') if isinstance(
-                problem, dict) else None
+        correct_count += data.get('correct', 0)
+        total_count += 1
 
-            # 使用benchmark的方法计算准确率
-            if hasattr(benchmark, 'calculate_score') and hasattr(benchmark, 'extract_number'):
-                try:
-                    predicted = benchmark.extract_number(answer)
-                    expected = benchmark.extract_number(
-                        str(ground_truth)) if ground_truth else None
-
-                    if predicted is not None and expected is not None:
-                        score, _ = benchmark.calculate_score(
-                            expected, predicted)
-                        if score > 0.5:  # 正确
-                            correct_count += 1
-                        total_count += 1
-                except Exception as e:
-                    logger.warning(f"计算准确率时出错: {e}")
-
-    train_accuracy = (correct_count / total_count *
-                      100) if total_count > 0 else 0.0
+    train_accuracy = (correct_count / total_count * 100) if total_count > 0 else 0.0
 
     cprint(
         f"[TDMAS] 训练集准确率 | Epoch {epoch} | Accuracy: {train_accuracy:.4f}% ({correct_count}/{total_count})",
@@ -202,7 +176,7 @@ async def optimize_model(
 
     # 在独立子进程中运行优化，避免主进程持有CUDA上下文
     trainer_script = os.path.join(
-        os.path.dirname(__file__), "reference/optimize.py")
+        os.path.dirname(__file__), "tdmas/optimize.py")
     cmd = [
         sys.executable,
         trainer_script,
@@ -228,13 +202,18 @@ async def evaluate_model(
     benchmark,
     test_data: list,
     epoch: int,
-    limit: Optional[int] = None,
-    max_depth: int = 5,
-    max_concurrent: int = 10,
+    config: dict,
     zcp: str = "accuracy"
 ):
     """评估模型性能"""
     cprint(f"[TDMAS] 开始评估模型 | Epoch {epoch} | Dataset {dataset}", color="blue")
+    
+    limit=config.get('limit')
+    max_depth=config.get('max_depth', 5)
+    max_loop=config.get('max_loop', 5)
+    max_concurrent_request=config.get('max_concurrent_request', 10)
+    max_concurrent_execute_code=config.get('max_concurrent_execute_code', 128)
+    test_ask_num=config.get('test_ask_num', 8)
 
     # 限制数据量
     if limit is not None:
@@ -247,7 +226,10 @@ async def evaluate_model(
     results = await evaluator.evaluate_batch(
         test_data,
         max_depth=max_depth,
-        max_concurrent=max_concurrent
+        max_concurrent_request=max_concurrent_request,
+        max_concurrent_execute_code=max_concurrent_execute_code,
+        max_loop=max_loop,
+        test_ask_num=test_ask_num
     )
 
     # 计算准确率
@@ -255,8 +237,8 @@ async def evaluate_model(
     accuracy_percentage = accuracy * 100
 
     cprint(
-        f"[TDMAS] 模型评估完成 | Epoch {epoch} | 准确率: {accuracy_percentage:.4f}%", color="green")
-    logger.info(f"模型评估完成，准确率: {accuracy_percentage:.4f}%")
+        f"[TDMAS] 模型评估完成 | Epoch {epoch} | 测试集准确率: {accuracy_percentage:.4f}%", color="green")
+    logger.info(f"模型评估完成，测试集准确率: {accuracy_percentage:.4f}%")
 
     # 保存测试集准确率到文件
     result_dir = evaluation_output_dir(dataset, zcp)
@@ -283,12 +265,14 @@ async def run_training_epoch(
     zcp = config.get('zcp', 'accuracy')
     limit = config.get('limit')
     max_depth = config.get('max_depth', 5)
-    max_concurrent = config.get('max_concurrent', 10)
+    max_concurrent_request = config.get('max_concurrent_request', 10)
+    max_concurrent_execute_code = config.get('max_concurrent_execute_code', 128)
+    train_ask_num = config.get('train_ask_num', 8)
+    max_loop = config.get('max_loop', 5)
 
     cprint(f"[TDMAS] {'='*10} Epoch {epoch} {'='*10}", color="blue")
 
     # 1. 收集训练数据
-    ask_num = config.get('ask_num', 8)
     collected_data = await collect_training_data(
         model_name,
         dataset,
@@ -297,8 +281,10 @@ async def run_training_epoch(
         epoch,
         limit=limit,
         max_depth=max_depth,
-        max_concurrent=max_concurrent,
-        ask_num=ask_num,
+        max_concurrent_request=max_concurrent_request,
+        max_concurrent_execute_code=max_concurrent_execute_code,
+        train_ask_num=train_ask_num,
+        max_loop=max_loop,
         zcp=zcp
     )
     get_global_llm_manager().clear_all()
@@ -323,8 +309,8 @@ async def run_training_epoch(
     return
 
 
-async def run_full_pipeline(config_path: str = "config/running_config.yaml"):
-    """运行完整的训练pipeline"""
+async def run_pipeline(config_path: str = "config/running_config.yaml"):
+    """运行训练pipeline"""
     # 加载配置
     config = load_config(config_path)
 
@@ -343,12 +329,21 @@ async def run_full_pipeline(config_path: str = "config/running_config.yaml"):
     # 加载数据集
     benchmark, training_data = load_dataset(dataset, "validate")
     _, test_data = load_dataset(dataset, "test")
+    
+    # 为每个entry分配唯一问题id（递增）
+    next_auto_id = 0
+    for entry in training_data:
+        entry['id'] = f"auto_{next_auto_id}"
+        next_auto_id += 1
+    for entry in test_data:
+        entry['id'] = f"auto_{next_auto_id}"
+        next_auto_id += 1
 
     # 加载模型配置
     with open("config/local_llm.yaml", "r") as f:
         llm_config = yaml.safe_load(f)
 
-    model_name = config.get(
+    base_model_name = config.get(
         'model_name', llm_config.get('default_llm', 'Qwen3-8B'))
 
     # 确定运行模式
@@ -363,52 +358,59 @@ async def run_full_pipeline(config_path: str = "config/running_config.yaml"):
     if infer_only:
         # 只执行评估
         for epoch in range(start_epoch, end_epoch + 1):
-            accuracy, results = await evaluate_model(
-                model_name,
-                dataset,
-                benchmark,
-                test_data,
-                epoch,
-                limit=config.get('limit'),
-                max_depth=config.get('max_depth', 5),
-                max_concurrent=config.get('max_concurrent', 10),
-                zcp=zcp
-            )
-    elif train_only:
-        # 只执行训练
-        for epoch in range(start_epoch, end_epoch):
-            await run_training_epoch(
-                config,
-                epoch,
-                benchmark,
-                training_data,
-                model_name,
-                train_only=True
-            )
-    else:
-        # 完整的pipeline：训练 + 评估
-        for epoch in range(start_epoch, end_epoch):
-            await run_training_epoch(
-                config,
-                epoch,
-                benchmark,
-                training_data,
-                model_name,
-                train_only=False
-            )
-            eval_model_name = build_finetuned_model_name(
-                model_name, dataset, zcp, epoch + 1)
+            eval_model_name = build_model_name(base_model_name, dataset, zcp, epoch)
             accuracy, results = await evaluate_model(
                 eval_model_name,
                 dataset,
                 benchmark,
                 test_data,
-                end_epoch,
-                limit=config.get('limit'),
-                max_depth=config.get('max_depth', 5),
-                max_concurrent=config.get('max_concurrent', 10),
+                epoch,
+                config,
                 zcp=zcp
             )
+    elif train_only:
+        # 只执行训练
+        for epoch in range(start_epoch, end_epoch):
+            _model_name = build_model_name(base_model_name, dataset, zcp, epoch)
+            await run_training_epoch(
+                config,
+                epoch,
+                benchmark,
+                training_data,
+                _model_name,
+                train_only=True
+            )
+    else:
+        # 完整的pipeline：训练 + 评估
+        for epoch in range(start_epoch, end_epoch):
+            _model_name = build_model_name(base_model_name, dataset, zcp, epoch)
+            accuracy, results = await evaluate_model(
+                _model_name,
+                dataset,
+                benchmark,
+                test_data,
+                epoch,
+                config,
+                zcp=zcp
+            )
+            await run_training_epoch(
+                config,
+                epoch,
+                benchmark,
+                training_data,
+                _model_name,
+                train_only=False
+            )
+        _model_name = build_model_name(base_model_name, dataset, zcp, end_epoch)
+        accuracy, results = await evaluate_model(
+            _model_name,
+            dataset,
+            benchmark,
+            test_data,
+            end_epoch,
+            config,
+            zcp=zcp
+        )
 
     get_global_llm_manager().clear_all()
     cprint("[TDMAS] Pipeline完成!", color="green")
@@ -427,7 +429,7 @@ def main():
 
     args = parser.parse_args()
 
-    asyncio.run(run_full_pipeline(args.config))
+    asyncio.run(run_pipeline(args.config))
 
 
 if __name__ == "__main__":

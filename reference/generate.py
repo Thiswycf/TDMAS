@@ -22,7 +22,7 @@ from termcolor import cprint
 
 from utils.llm_manager import get_global_llm_manager
 from utils.path_utils import (
-    build_finetuned_model_name,
+    build_model_name,
     ensure_dir,
     finetuned_dir,
     temp_generate_dir,
@@ -476,7 +476,7 @@ async def run_generate(
     generator_model_name = (
         generator_model_name
         if is_first
-        else build_finetuned_model_name(generator_model_name, data_set, zcp, epoch)
+        else build_model_name(generator_model_name, data_set, zcp, epoch)
     )
     generator_sampling_params = get_sampling_params(generator_temperature)
 

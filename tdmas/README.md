@@ -63,7 +63,7 @@ end_epoch: 3                # End epoch
 model_name: Qwen3-8B        # Model name
 limit: 16                   # Limit number of samples (for rapid testing)
 max_depth: 5                # Maximum recursion depth
-max_concurrent: 10          # Maximum concurrency
+max_concurrent_request: 10          # Maximum concurrency
 ```
 
 ## Workflow

@@ -1,9 +1,12 @@
 """
 Prompt template definitions
 """
+from typing import Optional, Tuple, Union, List, Dict
 
 # First question prompt template (leader agent l's first round input)
 FIRST_QUESTION_PROMPT_TEMPLATE = """I have a question: {question}. You need to solve it and provide feedback. You have two ways to solve it: directly answer (i.e., directly return the answer or runnable Python code that can directly return the answer) and decompose the question into several sub-questions.
+
+If you choose to decompose into sub-questions, each sub-question must contain all necessary context and relevant information required to answer it. Do not ask fragmented questions that lack essential context.
 
 Your feedback needs to include a score (out of 100) and an evaluation text (i.e., whether the question is well-formulated, whether there are unreasonable or ambiguous aspects).
 
@@ -25,13 +28,16 @@ Format output requirements as follows:
 2. If you choose to decompose into sub-questions, please use the following format:
    <subquestions>
    <subquestion id="1">
-   [Sub-question 1]
+   [Sub-question 1 - must include all necessary context and relevant information from the original question]
    </subquestion>
    <subquestion id="2">
-   [Sub-question 2]
+   [Sub-question 2 - must include all necessary context and relevant information from the original question]
    </subquestion>
    ...
    </subquestions>
+
+   When you ask follow-up questions in later turns, if a follow-up question is about a previously asked sub-question, you MUST reuse the same id as that sub-question; if it is a completely new sub-question, you MUST use a new id that has not been used before.
+
    <score>Score (0-100)</score>
    <evaluation>Evaluation text</evaluation>
 """
@@ -70,7 +76,7 @@ Format output requirements as follows:
 2. If you need to continue asking questions, please use the following format:
    <subquestions>
    <subquestion id="{next_id}">
-   [New sub-question or follow-up question]
+   [New sub-question or follow-up question - must include all necessary context and relevant information needed to answer it]
    </subquestion>
    ...
    </subquestions>
@@ -87,12 +93,21 @@ Format output requirements as follows:
 """
 
 # Non-first question prompt template (leader agent l receives a question again after submitting the first question)
-NON_FIRST_QUESTION_PROMPT_TEMPLATE = """For your replied answer, the current reply is as follows (including answer and feedback):
-{previous_reply}
+NON_FIRST_QUESTION_PROMPT_TEMPLATE = """Your response has been evaluated. Here is your supervisor's feedback:
+<feedback>
+Score: {feedback_score}
+Evaluation: {feedback_text}
+</feedback>
 
-I have a question: {question}. You need to solve it and provide feedback. You have two ways to solve it: directly answer (i.e., directly return the answer or runnable Python code that can directly return the answer) and decompose the question into several sub-questions.
+Now you need to solve the new question: {question} You need to solve it and provide feedback. You have two ways to solve it: 
+directly answer (i.e., directly return the answer or runnable Python code that can directly return the answer) 
+and decompose the question into several sub-questions.
 
-Your feedback needs to include a score (out of 100) and an evaluation text (i.e., whether the question is well-formulated, whether there are unreasonable or ambiguous aspects).
+If you choose to decompose into sub-questions, each sub-question must contain all necessary context and relevant 
+information required to answer it. Do not ask fragmented questions that lack essential context.
+
+Your feedback needs to include a score (out of 100) and an evaluation text (i.e., whether the question is 
+well-formulated, whether there are unreasonable or ambiguous aspects).
 
 If you choose to provide Python code:
 - The code should be self-contained and executable
@@ -112,10 +127,10 @@ Format output requirements as follows:
 2. If you choose to decompose into sub-questions, please use the following format:
    <subquestions>
    <subquestion id="1">
-   [Sub-question 1]
+   [Sub-question 1 - must include all necessary context and relevant information from the original question]
    </subquestion>
    <subquestion id="2">
-   [Sub-question 2]
+   [Sub-question 2 - must include all necessary context and relevant information from the original question]
    </subquestion>
    ...
    </subquestions>
@@ -124,12 +139,18 @@ Format output requirements as follows:
 """
 
 
-def format_first_question_prompt(question: str) -> str:
+def format_first_question_prompt(question: str,
+                                 use_chat_template: bool = True,
+                                 ) -> Union[List[str], List[Dict[str, str]]]:
     """Format the first question prompt"""
-    return FIRST_QUESTION_PROMPT_TEMPLATE.format(question=question)
+    prompt = FIRST_QUESTION_PROMPT_TEMPLATE.format(question=question)
+    if use_chat_template:
+        return [{"role": "user", "content": prompt}]
+    else:
+        return [prompt]
 
 
-def format_reply_prompt(original_question: str, subquestion_replies: list, num_subquestions: int) -> str:
+def format_reply_prompt(original_question: str, subquestion_replies: list, num_subquestions: int, use_chat_template: bool = True) -> Union[List[str], List[Dict[str, str]]]:
     """Format the reply prompt
 
     Args:
@@ -150,26 +171,49 @@ def format_reply_prompt(original_question: str, subquestion_replies: list, num_s
     # Calculate next sub-question ID
     next_id = num_subquestions + 1
 
-    return REPLY_PROMPT_TEMPLATE.format(
+    prompt = REPLY_PROMPT_TEMPLATE.format(
         original_question=original_question,
         subquestion_replies=subquestion_replies_text,
         num_subquestions=num_subquestions,
         next_id=next_id
     )
+    if use_chat_template:
+        return [{"role": "user", "content": prompt}]
+    else:
+        return [prompt]
 
 
-def format_non_first_question_prompt(question: str, previous_reply: dict) -> str:
+def format_non_first_question_prompt(
+    question: str,
+    previous_conversation: Union[List[str], List[Dict[str, str]]],
+    feedback: Optional[Tuple[float, str]] = None,
+    use_chat_template: bool = True,
+) -> Union[List[str], List[Dict[str, str]]]:
     """Format the non-first question prompt
 
     Args:
         question: Current question
-        previous_reply: Previous reply, containing answer, score, and evaluation
+        previous_conversation: Previous conversation, each element can be a string (no use chat template) or a dictionary (use chat template)
+        feedback: Supervisor feedback for the previous round (score + evaluation)
+        use_chat_template: Kept for compatibility; when True returns multi-round chat messages.
     """
-    reply_text = f"Answer: {previous_reply.get('answer', '')}\n"
-    reply_text += f"Score: {previous_reply.get('score', 'N/A')}\n"
-    reply_text += f"Evaluation: {previous_reply.get('evaluation', 'N/A')}"
+    feedback_score, feedback_text = feedback
 
-    return NON_FIRST_QUESTION_PROMPT_TEMPLATE.format(
+    user_content = NON_FIRST_QUESTION_PROMPT_TEMPLATE.format(
         question=question,
-        previous_reply=reply_text
+        feedback_score=feedback_score,
+        feedback_text=feedback_text,
     )
+
+    # Return multi-round conversation format compatible with VLLMAdapter:
+    # - odd number of messages
+    # - roles alternate user/assistant/user/...
+    # - last message is user
+    if use_chat_template:
+        conversation = previous_conversation + \
+            [{"role": "user", "content": user_content}]
+    else:
+        conversation = previous_conversation + [user_content]
+
+    # Default: single-round user message (still a valid multi-round structure of length 1)
+    return conversation

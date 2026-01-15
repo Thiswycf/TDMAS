@@ -1,6 +1,9 @@
 logs/
 config/local_llm.yaml
 config/optimize_config.yaml
+config/generator_config.yaml
+scoreflow_workspace/
+tmp/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

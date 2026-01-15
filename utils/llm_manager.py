@@ -381,6 +381,7 @@ class LLMManager:
             # return 21.6 * 4 # NOTE: modified
         elif "7b" in model_name.lower() or "8b" in model_name.lower():
             # return 21.6
+            # return 21.6 * 1.2  # NOTE: modified
             return 21.6 * 1.8  # NOTE: modified
         elif "4B" in model_name or "4b" in model_name:
             return 21.6
@@ -501,7 +502,7 @@ class LLMManager:
 
         if allocated_gpus is None or cuda_visible_devices is None:
             logger.error(f"所有GPU组合都不可用，llm_name：{llm_name}")
-            raise ValueError(f"所有GPU组合都不可用，llm_name：{llm_name}")
+            exit(1)
 
         # 计算GPU内存利用率
         gpu_memory_utilization = LLMManager._calculate_gpu_memory_utilization(
@@ -593,6 +594,12 @@ class LLMManager:
         if llm_name is None:
             # logger.info(f"NO LLM name is specified, the default model will be used: {self.config.get('default_llm')}")
             llm_name = self.config.get("default_llm")
+
+        if llm_name == 'random':
+            if not self.instantiated_llms:
+                raise RuntimeError("当前没有可用的LLM实例（llm池为空），无法分配随机模型。")
+            # 任意选择一个已有llm_name
+            llm_name = next(iter(self.instantiated_llms))
 
         if 'finetuned' in llm_name:  # finetuned generator model
             assert 'EPOCH' in llm_name, "Finetuned generator model name must contain epoch number, model name: " + llm_name

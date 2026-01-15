@@ -142,53 +142,53 @@ def generate_preference_pairs(collected_data: List[Dict], similarity_threshold: 
     logger.info(f"生成了 {len(preference_pairs)} 个偏好对，跳过了 {skipped_pairs} 个偏好对")
 
     # 对选中的pairs的chosen/rejected_score进行归一化处理（在采样之前进行）
-    if preference_pairs:
-        all_scores = []
-        for pair in preference_pairs:
-            chosen_score = pair.get('chosen_score', 0.0)
-            rejected_score = pair.get('rejected_score', 0.0)
-            all_scores.append(chosen_score)
-            all_scores.append(rejected_score)
+    # if preference_pairs:
+    #     all_scores = []
+    #     for pair in preference_pairs:
+    #         chosen_score = pair.get('chosen_score', 0.0)
+    #         rejected_score = pair.get('rejected_score', 0.0)
+    #         all_scores.append(chosen_score)
+    #         all_scores.append(rejected_score)
 
-        min_score = min(all_scores)
-        max_score = max(all_scores)
-        # avoid division by zero
-        score_range = max_score - min_score if max_score != min_score else 1.0
+    #     min_score = min(all_scores)
+    #     max_score = max(all_scores)
+    #     # avoid division by zero
+    #     score_range = max_score - min_score if max_score != min_score else 1.0
 
-        logger.info(
-            f"归一化前：score范围 [{min_score:.6f}, {max_score:.6f}], score_range={score_range:.6f}")
+    #     logger.info(
+    #         f"归一化前：score范围 [{min_score:.6f}, {max_score:.6f}], score_range={score_range:.6f}")
 
-        for pair in preference_pairs:
-            original_chosen = pair.get('chosen_score', 0.0)
-            original_rejected = pair.get('rejected_score', 0.0)
+    #     for pair in preference_pairs:
+    #         original_chosen = pair.get('chosen_score', 0.0)
+    #         original_rejected = pair.get('rejected_score', 0.0)
 
-            normalized_chosen = (original_chosen - min_score) / score_range
-            normalized_rejected = (original_rejected - min_score) / score_range
+    #         normalized_chosen = (original_chosen - min_score) / score_range
+    #         normalized_rejected = (original_rejected - min_score) / score_range
 
-            pair['chosen_score'] = normalized_chosen
-            pair['rejected_score'] = normalized_rejected
+    #         pair['chosen_score'] = normalized_chosen
+    #         pair['rejected_score'] = normalized_rejected
 
-        # 验证归一化结果
-        normalized_scores = []
-        for pair in preference_pairs:
-            normalized_scores.append(pair.get('chosen_score', 0.0))
-            normalized_scores.append(pair.get('rejected_score', 0.0))
-        if normalized_scores:
-            logger.info(
-                f"归一化后：score范围 [{min(normalized_scores):.6f}, {max(normalized_scores):.6f}]")
+    #     # 验证归一化结果
+    #     normalized_scores = []
+    #     for pair in preference_pairs:
+    #         normalized_scores.append(pair.get('chosen_score', 0.0))
+    #         normalized_scores.append(pair.get('rejected_score', 0.0))
+    #     if normalized_scores:
+    #         logger.info(
+    #             f"归一化后：score范围 [{min(normalized_scores):.6f}, {max(normalized_scores):.6f}]")
 
-    # 删除chosen_score和rejected_score相差小于0.01的pairs
-    filtered_pairs = []
-    threshold = 0.01
-    for pair in preference_pairs:
-        chosen_score = pair.get('chosen_score', 0.0)
-        rejected_score = pair.get('rejected_score', 0.0)
-        if abs(chosen_score - rejected_score) >= threshold:
-            filtered_pairs.append(pair)
-    dropped_count = len(preference_pairs) - len(filtered_pairs)
-    if dropped_count > 0:
-        logger.info(f"删除了 {dropped_count} 个chosen_score和rejected_score相差小于{threshold}的偏好对")
-    preference_pairs = filtered_pairs
+    # # 删除chosen_score和rejected_score相差小于0.01的pairs
+    # filtered_pairs = []
+    # threshold = 0.01
+    # for pair in preference_pairs:
+    #     chosen_score = pair.get('chosen_score', 0.0)
+    #     rejected_score = pair.get('rejected_score', 0.0)
+    #     if abs(chosen_score - rejected_score) >= threshold:
+    #         filtered_pairs.append(pair)
+    # dropped_count = len(preference_pairs) - len(filtered_pairs)
+    # if dropped_count > 0:
+    #     logger.info(f"删除了 {dropped_count} 个chosen_score和rejected_score相差小于{threshold}的偏好对")
+    # preference_pairs = filtered_pairs
 
     if preference_pairs_limit is not None and len(preference_pairs) > preference_pairs_limit:
         preference_pairs = sample_data(

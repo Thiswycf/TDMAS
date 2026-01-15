@@ -64,6 +64,11 @@ class GSM8KBenchmark(BaseBenchmark):
         else:
             return 0
 
+    def direct_judge(self, predicted, problem):
+        predicted_number = self.extract_number(predicted)
+        expected_number = self.extract_number(problem["answer"])
+        return self.calculate_score(expected_number, predicted_number)[0]
+
     async def evaluate_problem(self, problem: dict, extraction: Optional[Callable], judger: Optional[Callable], graph: Callable, zcp: str = None) -> Tuple[str, str, float, float, float]:
         judger = None
         input_text = self.get_input_text(problem)

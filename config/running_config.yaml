@@ -1,13 +1,17 @@
 # running configuration
 
 # general
-dataset: GSM8K # dataset in datasets/
-task_type: full_pipeline # full_pipeline, infer_only, train_only
+dataset: AIME24 # datasets: GSM8K, AIME24, GPQA
+# task_type: full_pipeline # full_pipeline, infer_only, train_only
+# start_epoch: 0 # start epoch
+# end_epoch: 5 # end epoch
+task_type: infer_only # full_pipeline, infer_only, train_only
 start_epoch: 0 # start epoch
-end_epoch: 3 # end epoch
-ask_num: 8 # Number of repeated asks
+end_epoch: 0 # end epoch
+train_ask_num: 8 # Number of repeated asks to train
+test_ask_num: 8 # Number of repeated asks for stable test
 max_depth: 5 # max depth of the problem
-max_concurrent: 512 # max concurrent requests to the LLM
+max_loop: 5 # max turn of a problem
 
 # model
 model_name: Qwen3-8B # model name in config/local_llm.yaml
@@ -22,4 +26,8 @@ similarity_threshold: 0.8 # similarity threshold for preference pairs
 preference_pairs_limit: 128 # preference pairs per epoch
 
 # test
-limit: 128 # limit samples to rapid test
+limit: 128 # limit samples to rapid test (problems number)
+
+# system
+max_concurrent_request: 512 # max concurrent requests to the LLM
+max_concurrent_execute_code: 128 # max concurrent requests to execute code

@@ -1,12 +1,14 @@
+import asyncio
 import re
 from typing import Callable, List, Optional, Tuple
 
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_fixed
+from vllm import SamplingParams
 
 from ScoreFlow.benchmark.benchmark import BaseBenchmark
 from metagpt.logs import logger
 from utils.message import Message
-
+from utils.llm_manager import get_global_llm_manager
 
 class GPQABenchmark(BaseBenchmark):
     def __init__(self, name: str, file_path: str, log_path: str):
@@ -61,6 +63,33 @@ class GPQABenchmark(BaseBenchmark):
 
     def get_problem_id(self, problem):
         return problem.get("id", "")
+
+    async def direct_judge(self, predicted, problem):
+        prompt = (
+            "Given the question: " + problem["question"] +
+            "And the answer: " + problem["answer"] +
+            "And the response: " + predicted.strip() + 
+            "\nYou need to judge the response is correct or not. "
+            "If the response is correct, return 'True'. "
+            "If the response is incorrect, return 'False'. "
+            "Do not return any other text. "
+        )
+        output = await get_global_llm_manager().generate(
+            model_name='random',
+            prompt=prompt,
+            sampling_params=SamplingParams(
+                temperature=0.0,
+                top_p=0.95,
+                max_tokens=10,
+            )
+        )
+        result = output.outputs[0].text
+        if 'true' in result.lower():
+            return 1.0
+        else:
+            if 'false' not in result.lower():
+                logger.info(f"Invalid EXTRACTION output: {result}")
+            return 0.0
 
     async def evaluate_problem(
         self,
