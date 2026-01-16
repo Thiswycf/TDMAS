@@ -11,8 +11,9 @@ import traceback
 from metagpt.logs import logger
 from utils.llm_manager import get_global_llm_manager
 from utils.VLLMAdapter import VLLMAdapter
-from .prompts import format_first_question_prompt, format_reply_prompt, format_non_first_question_prompt
+from .prompts import format_first_question_prompt, format_reply_prompt, format_non_first_question_prompt, format_debug_prompt
 from .parser import parse_agent_response, is_response_truncated
+from .code_executor import extract_python_code, extract_and_execute_code
 
 
 class Agent:
@@ -103,6 +104,7 @@ class Agent:
         self,
         max_depth: int = 5,
         max_loop: int = 5,
+        max_debug_attempts: int = 2,
         feedback: Optional[Tuple[float, str]] = None,
     ) -> Dict[str, Any]:
         """递归、循环地解决当前 Agent 的问题，直到返回答案或者达到最大次数。
@@ -154,12 +156,61 @@ class Agent:
 
             # 2. 若本轮直接给出答案，则跳出循环返回答案与反馈
             if parsed_response.get("type") == "answer":
-                # 当前问题已经“提交给上级”（有了完整答案），不再需要子 agent
+                answer = parsed_response.get("answer", "")
+                saved_score = parsed_response.get("score")
+                saved_evaluation = parsed_response.get("evaluation")
+                
+                # 检查答案是否为代码
+                result, error, is_code = await extract_and_execute_code(answer)
+                if is_code and result is not None:
+                    # 进行调试（最多 max_debug_attempts 次）
+                    debug_attempts = 0
+                    while error is not None and debug_attempts < max_debug_attempts:
+                        last_debug_result = result  # 保存最后一次调试返回的答案
+                        debug_attempts += 1
+                        logger.info(f"开始第 {debug_attempts}/{max_debug_attempts} 次代码调试（depth={self.depth}）")
+                        
+                        # 构造调试 prompt
+                        error_message = error[:1000] if error else "Unknown error"  # 限制错误信息长度
+                        self.input_conversation = format_debug_prompt(
+                            error_message,
+                            self.input_conversation,
+                            use_chat_template=self.use_chat_template,
+                        )
+                        
+                        # 调用 LLM 获取调试后的代码
+                        debug_response_text, debug_input_tokens, debug_output_tokens = await self._call_llm(self.input_conversation)
+                        debug_parsed_response = parse_agent_response(debug_response_text)
+                        
+                        # 记录调试对话
+                        self._record_turn(debug_response_text, debug_parsed_response, debug_input_tokens, debug_output_tokens)
+                        
+                        # 提取调试后的代码
+                        answer = debug_parsed_response.get("answer", "")
+                        result, error, is_code = await extract_and_execute_code(answer)
+                        
+                        if not is_code:
+                            logger.warning(f"第 {debug_attempts} 次调试未返回有效代码，使用原始代码")
+                            break
+                        
+                        if error is None:
+                            # 调试成功，使用执行结果作为答案
+                            result = result.strip() if result else answer
+                            break
+                        else:
+                            logger.warning(f"第 {debug_attempts} 次调试后代码仍执行失败：{error[:200] if error else 'Unknown error'}")
+                        
+                    if error is not None:
+                        # 所有调试尝试都失败，保留最后一次尝试的代码作为答案
+                        logger.warning(f"经过 {debug_attempts} 次调试后代码仍无法执行（depth={self.depth}），保留最后一次尝试的代码作为答案")
+                        result = last_debug_result if debug_attempts > 0 else result
+                
+                # 当前问题已经"提交给上级"（有了完整答案），不再需要子 agent
                 self._clear_children()
                 return {
-                    "answer": parsed_response.get("answer", ""),
-                    "score": parsed_response.get("score"),
-                    "evaluation": parsed_response.get("evaluation"),
+                    "answer": result,
+                    "score": saved_score,
+                    "evaluation": saved_evaluation,
                     "final": True,
                     "reason": "direct_answer",
                 }
@@ -198,6 +249,7 @@ class Agent:
                             max_depth=max_depth,
                             max_loop=max_loop,
                             feedback=feedback,
+                            max_debug_attempts=max_debug_attempts,
                         )
                     )
 
@@ -227,10 +279,15 @@ class Agent:
             if parsed_response.get("type") not in ["answer", "subquestions"] or not parsed_response.get("subquestions"):
                 # 检查响应是否被截断
                 if is_response_truncated(response_text, parsed_response):
-                    logger.warning(
-                        f"问题在第 {turn_to_subordinates} 轮循环中未得到有效分解或回答（depth={self.depth}），"
-                        f"且响应可能被截断（达到最大输出限制）。响应文本长度: {len(response_text)}"
-                    )
+                    if len(response_text) < 1024:
+                        logger.warning(
+                            f"问题在第 {turn_to_subordinates} 轮循环中未得到有效分解或回答（depth={self.depth}），因为响应被截断。响应文本长度: {len(response_text)}"
+                        )
+                    return {
+                        "answer": "",
+                        "final": False,
+                        "reason": "response_truncated",
+                    }
                 else:
                     logger.warning(f"问题在第 {turn_to_subordinates} 轮循环中未得到有效分解或回答（depth={self.depth}）")
                 self._clear_children()
@@ -339,6 +396,7 @@ class MultiAgentSystem:
                 output_tokens_count = len(self.tokenizer.encode(response_text, add_special_tokens=False))
             else:
                 # tokenizer未加载，使用估算方法作为后备
+                logger.warning("tokenizer未加载，使用估算方法作为后备。")
                 if isinstance(prompt, str):
                     input_tokens_count = int(len(prompt.split()) * 1.3)
                 elif isinstance(prompt, list):
@@ -373,11 +431,12 @@ class MultiAgentSystem:
         question: str,
         max_depth: int = 5,
         max_loop: int = 5,
+        max_debug_attempts: int = 2,
     ) -> Dict[str, Any]:
         """递归解决一个问题（对外保持原有接口），由根 Agent 完成实际工作。"""
         # 创建根 Agent
         root_agent = Agent(self, question=question, depth=0, parent=None, use_chat_template=self.use_chat_template)
-        result = await root_agent.solve(max_depth=max_depth, max_loop=max_loop)
+        result = await root_agent.solve(max_depth=max_depth, max_loop=max_loop, max_debug_attempts=max_debug_attempts)
 
         # 在返回结果中补充全局统计信息
         result.update(

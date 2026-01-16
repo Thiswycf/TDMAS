@@ -12,6 +12,7 @@ train_ask_num: 8 # Number of repeated asks to train
 test_ask_num: 5 # Number of repeated asks for stable test
 max_depth: 5 # max depth of the problem
 max_loop: 5 # max turn of a problem
+max_debug_attempts: 2 # max debug attempts
 
 # model
 model_name: Qwen3-8B # model name in config/local_llm.yaml
@@ -28,8 +29,8 @@ similarity_threshold: 0.8 # similarity threshold for preference pairs
 preference_pairs_limit: 128 # preference pairs per epoch
 
 # test
-limit: 128 # limit samples to rapid test (problems number)
-# limit: 10000 # No limit
+# limit: 128 # limit samples to rapid test (problems number)
+limit: 10000 # No limit
 
 # system
 max_concurrent_request: 512 # max concurrent requests to the LLM

@@ -3,14 +3,11 @@
 在测试集上验证模型性能
 """
 
-import json
-import importlib
 import asyncio
-from typing import List, Dict, Any, Optional
+from typing import List, Dict
 from metagpt.logs import logger
 from .mas import MultiAgentSystem
 from .loss import calculate_loss
-from .code_executor import extract_and_execute_code
 
 
 class Evaluator:
@@ -35,6 +32,7 @@ class Evaluator:
         max_depth: int = 5,
         max_concurrent_execute_code: int = 128,
         max_loop: int = 5,
+        max_debug_attempts: int = 2,
     ) -> Dict:
         """收集单个问题的数据
 
@@ -43,7 +41,8 @@ class Evaluator:
             ground_truth: 正确答案（用于计算正确性损失）
             max_depth: 最大递归深度
             max_concurrent_execute_code: 最大并发执行代码数
-
+            max_loop: 最大循环次数
+            max_debug_attempts: 代码执行失败时的最大调试尝试次数
         Returns:
             包含问题、回答、损失等信息的字典
         """
@@ -56,21 +55,16 @@ class Evaluator:
             question_text,
             max_depth=max_depth,
             max_loop=max_loop,
+            max_debug_attempts=max_debug_attempts,
         )
 
         # 提取答案
         answer = result.get('answer', '')
+        final = result.get('final', False)
 
-        # 如果答案是代码，尝试执行并获取结果
-        executed_result, is_code = await extract_and_execute_code(answer, timeout=30, max_concurrent_execute_code=max_concurrent_execute_code)
-        if is_code:
-            if executed_result is not None:
-                # 执行成功，使用执行结果作为答案
-                answer = executed_result.strip()
-            else:
-                # 执行失败，保留原始代码作为答案
-                logger.warning(
-                    f"Code execution failed, keeping original answer, problem_id: {self.benchmark.get_problem_id(problem)}")
+        if not final:
+            logger.warning(f"Evaluation failed, problem_id: {self.benchmark.get_problem_id(problem)}, reason: {result.get('reason', '')}, answer: {answer}")
+            return None
 
         # 计算损失
         loss_info = await calculate_loss(
@@ -111,6 +105,7 @@ class Evaluator:
         max_concurrent_execute_code: int = 128,
         max_loop: int = 5,
         test_ask_num: int = 8,
+        max_debug_attempts: int = 2,
     ) -> List[Dict]:
         """批量评估问题
         
@@ -118,6 +113,10 @@ class Evaluator:
             problems: 问题列表
             max_depth: 最大递归深度
             max_concurrent_request: 最大并发数
+            max_concurrent_execute_code: 最大并发执行代码数
+            max_loop: 最大循环次数
+            test_ask_num: 每个问题重复询问的次数
+            max_debug_attempts: 代码执行失败时的最大调试尝试次数
         
         Returns:
             评估结果列表
@@ -127,7 +126,7 @@ class Evaluator:
         async def evaluate_with_semaphore(problem):
             async with semaphore:
                 try:
-                    return await self.evaluate_single_problem(problem, max_depth, max_concurrent_execute_code, max_loop)
+                    return await self.evaluate_single_problem(problem, max_depth, max_concurrent_execute_code, max_loop, max_debug_attempts)
                 except Exception as e:
                     import traceback
                     logger.error(f"评估数据时出错: {type(e).__name__}: {str(e)}\n{traceback.format_exc()}")

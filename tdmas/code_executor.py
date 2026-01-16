@@ -161,28 +161,7 @@ async def execute_python_code(code: str, timeout: int = 30) -> Tuple[Optional[st
         return None, f"执行出错: {type(e).__name__}: {str(e)}\n{traceback.format_exc()}", False
 
 
-async def execute_and_get_result(code: str, timeout: int = 30) -> Tuple[Optional[str], bool]:
-    """Execute Python code and return the result
-
-    Args:
-        code: Python code to execute
-        timeout: Execution timeout in seconds
-
-    Returns:
-        (result_text, success_flag)
-        - result_text: The result (output or return value)
-        - success_flag: True if execution succeeded
-    """
-    output, error, success = await execute_python_code(code, timeout)
-
-    if not success:
-        logger.warning(f"Code execution failed: {error}")
-        return error, False
-
-    return output, True
-
-
-async def extract_and_execute_code(text: str, timeout: int = 30, max_concurrent_execute_code: int = 128) -> Tuple[Optional[str], bool]:
+async def extract_and_execute_code(text: str, timeout: int = 30, max_concurrent_execute_code: int = 128) -> Tuple[Optional[str], Optional[str], bool]:
     """Extract Python code from text and execute it
 
     Args:
@@ -191,27 +170,28 @@ async def extract_and_execute_code(text: str, timeout: int = 30, max_concurrent_
         max_concurrent_execute_code: Maximum number of concurrent code executions
 
     Returns:
-        (result_text, is_code_flag)
+        (result_text, error_text, is_code_flag)
         - result_text: The execution result if code was found and executed, None if execution failed, original text if not code
+        - error_text: Error message if execution failed, None if succeeded
         - is_code_flag: True if code was detected (regardless of execution success), False if not code
     """
     code = extract_python_code(text)
 
     if code is None:
         # No code found, return original text and flag as not code
-        return text, False
+        return text, None, False
 
     # Code was found, try to execute
     # 使用共享的 Semaphore 来控制全局并发数量
     semaphore = _get_execution_semaphore(max_concurrent_execute_code)
     async with semaphore:
-        result, success = await execute_and_get_result(code, timeout)
+        result, error, success = await execute_python_code(code, timeout)
 
     if success:
         # Execution succeeded, return the result
-        return result, True
+        return result, None, True
     else:
         # Execution failed, return None to indicate failure (but flag as code)
         logger.warning(
-            f"Code execution failed: {result[:200] if result else 'Unknown error'}")
-        return None, True
+            f"Code execution failed: {error[:200] if error else 'Unknown error'}")
+        return result, error, True

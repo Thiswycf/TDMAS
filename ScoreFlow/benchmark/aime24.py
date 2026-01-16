@@ -33,7 +33,12 @@ class AIME24Benchmark(BaseBenchmark):
         try:
             expected = self._normalize_answer(expected_output)
             predicted = self._normalize_answer(prediction)
-            if expected is None or predicted is None:
+            try:
+                _ = float(predicted)
+                is_float = True
+            except Exception:
+                is_float = False
+            if expected is None or predicted is None or not is_float:
                 return 0.0, predicted
             return (1.0 if abs(float(expected) - float(predicted)) < 1e-6 else 0.0), predicted
         except Exception as e:

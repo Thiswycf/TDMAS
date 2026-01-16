@@ -3,21 +3,10 @@
 实现完整的训练pipeline：数据收集、优化、验证
 """
 
-import asyncio
-import argparse
-import os
-import json
-import yaml
-import shutil
-import importlib
-import subprocess
-import sys
-import datetime
-from typing import Optional
-from metagpt.logs import logger
-from termcolor import cprint
-
-from utils.llm_manager import get_global_llm_manager
+from tdmas.evaluator import Evaluator
+from tdmas.preference_data import generate_preference_pairs, save_preference_data
+from tdmas.data_collector import DataCollector
+import ScoreFlow.params
 from utils.path_utils import (
     ensure_dir,
     workspace_path,
@@ -25,10 +14,22 @@ from utils.path_utils import (
     evaluation_output_dir,
     solve_rate_file,
 )
-import ScoreFlow.params
-from tdmas.data_collector import DataCollector
-from tdmas.preference_data import generate_preference_pairs, save_preference_data
-from tdmas.evaluator import Evaluator
+from utils.llm_manager import get_global_llm_manager
+from termcolor import cprint
+from metagpt.logs import logger
+from typing import Optional
+import datetime
+import sys
+import subprocess
+import importlib
+import shutil
+import yaml
+import json
+import argparse
+import asyncio
+import os
+os.environ.setdefault("VLLM_LOGGING_LEVEL", "WARNING")
+os.environ.setdefault("VLLM_CONFIGURE_LOGGING", "0")
 
 
 def load_config(config_path: str = "config/running_config.yaml") -> dict:
@@ -88,6 +89,7 @@ async def collect_training_data(
     max_concurrent_execute_code: int = 128,
     train_ask_num: int = 8,
     max_loop: int = 5,
+    max_debug_attempts: int = 2,
     zcp: str = "accuracy"
 ):
     """收集训练数据"""
@@ -108,7 +110,8 @@ async def collect_training_data(
         max_concurrent_request=max_concurrent_request,
         max_concurrent_execute_code=max_concurrent_execute_code,
         train_ask_num=train_ask_num,
-        max_loop=max_loop
+        max_loop=max_loop,
+        max_debug_attempts=max_debug_attempts
     )
 
     cprint(
@@ -124,7 +127,8 @@ async def collect_training_data(
         correct_count += data.get('correct', 0)
         total_count += 1
 
-    train_accuracy = (correct_count / total_count * 100) if total_count > 0 else 0.0
+    train_accuracy = (correct_count / total_count *
+                      100) if total_count > 0 else 0.0
 
     cprint(
         f"[TDMAS] 训练集准确率 | Epoch {epoch} | Accuracy: {train_accuracy:.4f}% ({correct_count}/{total_count})",
@@ -207,13 +211,15 @@ async def evaluate_model(
 ):
     """评估模型性能"""
     cprint(f"[TDMAS] 开始评估模型 | Epoch {epoch} | Dataset {dataset}", color="blue")
-    
-    limit=config.get('limit')
-    max_depth=config.get('max_depth', 5)
-    max_loop=config.get('max_loop', 5)
-    max_concurrent_request=config.get('max_concurrent_request', 10)
-    max_concurrent_execute_code=config.get('max_concurrent_execute_code', 128)
-    test_ask_num=config.get('test_ask_num', 8)
+
+    limit = config.get('limit')
+    max_depth = config.get('max_depth', 5)
+    max_loop = config.get('max_loop', 5)
+    max_debug_attempts = config.get('max_debug_attempts', 2)
+    max_concurrent_request = config.get('max_concurrent_request', 10)
+    max_concurrent_execute_code = config.get(
+        'max_concurrent_execute_code', 128)
+    test_ask_num = config.get('test_ask_num', 8)
 
     # 限制数据量
     if limit is not None:
@@ -229,7 +235,8 @@ async def evaluate_model(
         max_concurrent_request=max_concurrent_request,
         max_concurrent_execute_code=max_concurrent_execute_code,
         max_loop=max_loop,
-        test_ask_num=test_ask_num
+        test_ask_num=test_ask_num,
+        max_debug_attempts=max_debug_attempts
     )
 
     # 计算准确率
@@ -266,9 +273,11 @@ async def run_training_epoch(
     limit = config.get('limit')
     max_depth = config.get('max_depth', 5)
     max_concurrent_request = config.get('max_concurrent_request', 10)
-    max_concurrent_execute_code = config.get('max_concurrent_execute_code', 128)
+    max_concurrent_execute_code = config.get(
+        'max_concurrent_execute_code', 128)
     train_ask_num = config.get('train_ask_num', 8)
     max_loop = config.get('max_loop', 5)
+    max_debug_attempts = config.get('max_debug_attempts', 2)
 
     cprint(f"[TDMAS] {'='*10} Epoch {epoch} {'='*10}", color="blue")
 
@@ -285,6 +294,7 @@ async def run_training_epoch(
         max_concurrent_execute_code=max_concurrent_execute_code,
         train_ask_num=train_ask_num,
         max_loop=max_loop,
+        max_debug_attempts=max_debug_attempts,
         zcp=zcp
     )
     get_global_llm_manager().clear_all()
@@ -329,7 +339,7 @@ async def run_pipeline(config_path: str = "config/running_config.yaml"):
     # 加载数据集
     benchmark, training_data = load_dataset(dataset, "validate")
     _, test_data = load_dataset(dataset, "test")
-    
+
     # 为每个entry分配唯一问题id（递增）
     next_auto_id = 0
     for entry in training_data:
@@ -358,7 +368,8 @@ async def run_pipeline(config_path: str = "config/running_config.yaml"):
     if infer_only:
         # 只执行评估
         for epoch in range(start_epoch, end_epoch + 1):
-            eval_model_name = build_model_name(base_model_name, dataset, zcp, epoch)
+            eval_model_name = build_model_name(
+                base_model_name, dataset, zcp, epoch)
             accuracy, results = await evaluate_model(
                 eval_model_name,
                 dataset,
@@ -371,7 +382,8 @@ async def run_pipeline(config_path: str = "config/running_config.yaml"):
     elif train_only:
         # 只执行训练
         for epoch in range(start_epoch, end_epoch):
-            _model_name = build_model_name(base_model_name, dataset, zcp, epoch)
+            _model_name = build_model_name(
+                base_model_name, dataset, zcp, epoch)
             await run_training_epoch(
                 config,
                 epoch,
@@ -383,7 +395,8 @@ async def run_pipeline(config_path: str = "config/running_config.yaml"):
     else:
         # 完整的pipeline：训练 + 评估
         for epoch in range(start_epoch, end_epoch):
-            _model_name = build_model_name(base_model_name, dataset, zcp, epoch)
+            _model_name = build_model_name(
+                base_model_name, dataset, zcp, epoch)
             accuracy, results = await evaluate_model(
                 _model_name,
                 dataset,
@@ -401,7 +414,8 @@ async def run_pipeline(config_path: str = "config/running_config.yaml"):
                 _model_name,
                 train_only=False
             )
-        _model_name = build_model_name(base_model_name, dataset, zcp, end_epoch)
+        _model_name = build_model_name(
+            base_model_name, dataset, zcp, end_epoch)
         accuracy, results = await evaluate_model(
             _model_name,
             dataset,

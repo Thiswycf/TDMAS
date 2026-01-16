@@ -221,3 +221,53 @@ def format_non_first_question_prompt(
 
     # Default: single-round user message (still a valid multi-round structure of length 1)
     return conversation
+
+
+# Debug prompt template (when code execution fails)
+DEBUG_PROMPT_TEMPLATE = """The code you provided previously encountered an error during execution. The error message is as follows:
+<error>
+{error_message}
+</error>
+
+Please fix the issues in your code and provide the corrected executable code. Your code should follow the following requirements:
+- The code should be self-contained and executable
+- Use print() to output the final answer
+- Do not use input() or any interactive functions
+- Avoid using external libraries that may not be available
+- The code should produce a clear, final output that answers the question
+
+Please output the corrected code in the following format and <score> and <evaluation> are NOT needed:
+
+<answer>
+```python
+[Corrected executable code]
+```
+</answer>
+"""
+
+
+def format_debug_prompt(
+    error_message: str,
+    previous_conversation: Union[List[str], List[Dict[str, str]]],
+    use_chat_template: bool = True,
+) -> Union[List[str], List[Dict[str, str]]]:
+    """Format the debug prompt when code execution fails
+
+    Args:
+        question: Original question
+        code: The code that failed to execute
+        error_message: Error message from code execution
+        previous_conversation: Previous conversation history
+        use_chat_template: Whether to use chat template format
+    """
+    user_content = DEBUG_PROMPT_TEMPLATE.format(
+        error_message=error_message,
+    )
+
+    # Return multi-round conversation format compatible with VLLMAdapter
+    if use_chat_template:
+        conversation = previous_conversation + [{"role": "user", "content": user_content}]
+    else:
+        conversation = previous_conversation + [user_content]
+
+    return conversation

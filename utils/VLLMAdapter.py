@@ -3,15 +3,18 @@
 """
 VLLMAdapter for local large language models, compatible with all API calls
 """
-from __future__ import annotations
-
-import asyncio
-from typing import List, Union, Dict, Any
+from transformers import AutoTokenizer
+from vllm import LLM, SamplingParams
+import logging
+from typing import List, Union, Dict
 import yaml
 import os
 
-from vllm import LLM, SamplingParams
-from transformers import AutoTokenizer
+os.environ.setdefault("VLLM_LOGGING_LEVEL", "WARNING")
+os.environ.setdefault("VLLM_CONFIGURE_LOGGING", "0")
+logging.getLogger("vllm").setLevel(logging.WARNING)
+logging.getLogger("vllm.__init__").setLevel(logging.WARNING)
+logging.getLogger("transformers").setLevel(logging.WARNING)
 
 
 class VLLMAdapter():
