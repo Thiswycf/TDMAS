@@ -82,7 +82,7 @@ class Agent:
         else:
             self.input_conversation.append(response_text)
 
-    def _update_scores(self, parsed: Dict[str, Any], subquestion_responses: Optional[List[Dict[str, Any]]] = None) -> None:
+    def _update_scores(self, parsed: Dict[str, Any]) -> None:
         """根据解析结果更新本 agent 及 MAS 的打分记录。"""
         scores = parsed.get("scores", [])
         if self.turn_to_superior == 1:
@@ -95,7 +95,7 @@ class Agent:
         """释放（解散）当前 agent 的所有下级 agent。"""
         self.children.clear()
 
-    async def _call_llm(self, prompt: str | List[Dict[str, str]]) -> Tuple[str, int, int]:
+    async def _call_llm(self, prompt: Union[str, List[Dict[str, str]]]) -> Tuple[str, int, int]:
         """代理 MAS 统一的 LLM 调用，方便未来在 Agent 级别扩展额外信息。"""
         return await self.mas._call_llm(prompt)
 
@@ -241,7 +241,7 @@ class Agent:
         return {
             "answer": "",
             "final": False,
-            "reason": "max_loop_reached_or_unknown_state",
+            "reason": "unknown_state",
         }
 
 
@@ -283,8 +283,11 @@ class MultiAgentSystem:
 
         # 是否使用聊天模板
         self.use_chat_template = VLLMAdapter.needs_chat_template(self.model_name)
+        
+        # 从LLMManager获取tokenizer（统一管理，避免重复创建）
+        self.tokenizer = get_global_llm_manager().get_tokenizer(self.model_name)
     
-    async def _call_llm(self, prompt: str | List[Dict[str, str]]) -> Tuple[str, int, int]:
+    async def _call_llm(self, prompt: Union[str, List[Dict[str, str]]]) -> Tuple[str, int, int]:
         """调用LLM并返回响应和token消耗
         
         Returns:
@@ -298,36 +301,66 @@ class MultiAgentSystem:
         
         response_text = output.outputs[0].text
         
-        # 从output中提取token信息（如果可用）
-        # vllm的output对象通常有prompt_token_ids属性，但可能不在output对象上
-        # 使用简单的估算方法，后期需要优化
+        # 使用tokenizer准确计算token数
         try:
-            # 尝试从output获取token信息
-            if hasattr(output, 'prompt_token_ids') and output.prompt_token_ids:
-                input_tokens_count = len(output.prompt_token_ids) if isinstance(output.prompt_token_ids, list) else 0
+            if self.tokenizer is not None:
+                # 计算输入token数
+                if isinstance(prompt, str):
+                    # 单轮对话：直接编码
+                    input_tokens_count = len(self.tokenizer.encode(prompt, add_special_tokens=False))
+                elif isinstance(prompt, list):
+                    # 多轮对话：需要根据是否使用chat_template来处理
+                    if self.use_chat_template:
+                        # 使用chat_template处理（与VLLMAdapter中的处理方式一致）
+                        kwargs = {
+                            "tokenize": False,
+                            "add_generation_prompt": True,
+                        }
+                        if "qwen3" in self.model_name.lower():
+                            kwargs["enable_thinking"] = False
+                        # 应用chat_template得到处理后的文本，然后编码
+                        processed_prompt = self.tokenizer.apply_chat_template(
+                            prompt,
+                            **kwargs
+                        )
+                        input_tokens_count = len(self.tokenizer.encode(processed_prompt, add_special_tokens=False))
+                    else:
+                        # 不使用chat_template：拼接所有消息内容
+                        joined = ""
+                        for msg in prompt:
+                            role = msg["role"].capitalize() if isinstance(msg, dict) else ""
+                            content = msg.get("content", "") if isinstance(msg, dict) else str(msg)
+                            joined += f"{role}: {content}\n\n"
+                        input_tokens_count = len(self.tokenizer.encode(joined.strip(), add_special_tokens=False))
+                else:
+                    raise ValueError(f"Invalid prompt type: {type(prompt)}")
+                
+                # 计算输出token数
+                output_tokens_count = len(self.tokenizer.encode(response_text, add_special_tokens=False))
             else:
-                # 估算：中文字符和英文单词的平均token数约为1.3
+                # tokenizer未加载，使用估算方法作为后备
                 if isinstance(prompt, str):
                     input_tokens_count = int(len(prompt.split()) * 1.3)
                 elif isinstance(prompt, list):
-                    # Rough estimate for multi-round conversations: join all contents.
                     joined = " ".join(
                         (m.get("content", "") if isinstance(m, dict) else str(m)) for m in prompt
                     )
                     input_tokens_count = int(len(joined.split()) * 1.3)
                 else:
                     raise ValueError(f"Invalid prompt type: {type(prompt)}")
-        except Exception as e:
-            logger.error(f"Failed to estimate input tokens for prompt: {prompt}, error: {type(e).__name__}: {traceback.format_exc()}")
-            raise e
-        
-        try:
-            # 尝试从output.outputs获取token信息
-            if hasattr(output.outputs[0], 'token_ids') and output.outputs[0].token_ids:
-                output_tokens_count = len(output.outputs[0].token_ids) if isinstance(output.outputs[0].token_ids, list) else 0
-            else:
                 output_tokens_count = int(len(response_text.split()) * 1.3)
-        except:
+        except Exception as e:
+            logger.error(f"计算token数失败: {e}, 使用估算方法")
+            # 发生错误时使用估算方法作为后备
+            if isinstance(prompt, str):
+                input_tokens_count = int(len(prompt.split()) * 1.3)
+            elif isinstance(prompt, list):
+                joined = " ".join(
+                    (m.get("content", "") if isinstance(m, dict) else str(m)) for m in prompt
+                )
+                input_tokens_count = int(len(joined.split()) * 1.3)
+            else:
+                raise ValueError(f"Invalid prompt type: {type(prompt)}")
             output_tokens_count = int(len(response_text.split()) * 1.3)
         
         self.total_input_tokens += input_tokens_count

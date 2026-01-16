@@ -18,7 +18,7 @@ def get_metagpt_package_root():
     else:
         package_root = Path.cwd()
 
-    logger.info(f"Package root set to {str(package_root)}")
+    # logger.info(f"Package root set to {str(package_root)}")
     return package_root
 
 

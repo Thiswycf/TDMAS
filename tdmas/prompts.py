@@ -4,7 +4,9 @@ Prompt template definitions
 from typing import Optional, Tuple, Union, List, Dict
 
 # First question prompt template (leader agent l's first round input)
-FIRST_QUESTION_PROMPT_TEMPLATE = """I have a question: {question}. You need to solve it and provide feedback. You have two ways to solve it: directly answer (i.e., directly return the answer or runnable Python code that can directly return the answer) and decompose the question into several sub-questions.
+FIRST_QUESTION_PROMPT_TEMPLATE = """I have a question as following:
+{question}
+You need to solve it and provide feedback. You have two ways to solve it: directly answer (i.e., directly return the answer or runnable Python code that directly prints the answer) and decompose the question into several sub-questions.
 
 If you choose to decompose into sub-questions, each sub-question must contain all necessary context and relevant information required to answer it. Do not ask fragmented questions that lack essential context.
 
@@ -14,7 +16,7 @@ If you choose to provide Python code:
 - The code should be self-contained and executable
 - Use print() to output the final answer
 - Do not use input() or any interactive functions
-- Avoid using external libraries that may not be available
+- Avoid using external libraries that are unnecessary or may not be available
 - The code should produce a clear, final output that answers the question
 
 Format output requirements as follows:
@@ -36,8 +38,6 @@ Format output requirements as follows:
    ...
    </subquestions>
 
-   When you ask follow-up questions in later turns, if a follow-up question is about a previously asked sub-question, you MUST reuse the same id as that sub-question; if it is a completely new sub-question, you MUST use a new id that has not been used before.
-
    <score>Score (0-100)</score>
    <evaluation>Evaluation text</evaluation>
 """
@@ -48,7 +48,9 @@ REPLY_PROMPT_TEMPLATE = """For the {num_subquestions} sub-questions you proposed
 
 Please score (out of 100) and evaluate each of their answers based on the sub-question replies (i.e., evaluate their answer performance).
 
-Additionally, if you think the question {original_question} has been ultimately answered, then answer directly (i.e., directly return the answer or runnable Python code that can directly return the answer); otherwise, please ask follow-up questions about the previously proposed questions or propose new sub-questions, and do not ask about sub-questions that have already been well answered.
+Additionally, if you think the question {original_question} has been ultimately answered, then answer directly (i.e., directly return the answer or runnable Python code that directly prints the answer); otherwise, please ask follow-up questions about the previously proposed questions or propose new sub-questions, and do not ask about sub-questions that have already been well answered.
+
+When you ask follow-up questions, if the question is about a previously asked sub-question, you MUST reuse the same id as that sub-question; if it is a completely new sub-question, an incrementing ID that has not been used before must be used.
 
 If you choose to provide Python code:
 - The code should be self-contained and executable
@@ -99,8 +101,10 @@ Score: {feedback_score}
 Evaluation: {feedback_text}
 </feedback>
 
-Now you need to solve the new question: {question} You need to solve it and provide feedback. You have two ways to solve it: 
-directly answer (i.e., directly return the answer or runnable Python code that can directly return the answer) 
+Now you need to solve the new question as following:
+{question}
+You need to solve it and provide feedback. You have two ways to solve it: 
+directly answer (i.e., directly return the answer or runnable Python code that directly prints the answer) 
 and decompose the question into several sub-questions.
 
 If you choose to decompose into sub-questions, each sub-question must contain all necessary context and relevant 
@@ -113,7 +117,7 @@ If you choose to provide Python code:
 - The code should be self-contained and executable
 - Use print() to output the final answer
 - Do not use input() or any interactive functions
-- Avoid using external libraries that may not be available
+- Avoid using external libraries that are unnecessary or may not be available
 - The code should produce a clear, final output that answers the question
 
 Format output requirements as follows:

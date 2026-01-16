@@ -27,6 +27,7 @@ import multiprocessing
 from typing import Optional, Dict, Tuple, Any, List
 import itertools
 from vllm import SamplingParams
+from transformers import AutoTokenizer
 
 # 在导入可能初始化CUDA的库之前设置多进程启动方式
 multiprocessing.set_start_method('spawn', force=True)
@@ -193,17 +194,14 @@ class LLMProcess(multiprocessing.Process):
                     groups: Dict[Tuple, List[Tuple[int, dict]]] = {}
                     for idx, req in enumerate(requests):
                         if req["type"] == "generate":
-                            key = tuple(
-                                sorted(req["kwargs"]["sampling_params"].__dict__.items()))
+                            sampling_params = req["kwargs"]["sampling_params"]
+                            key = str(sampling_params)
                             groups.setdefault(key, []).append((idx, req))
 
                     # 对每一类并行输入llm_instance
                     for key, group in groups.items():
-                        # 提取prompts
                         prompts = [req["kwargs"]["prompt"] for _, req in group]
-                        # 取第一个请求的采样参数
                         sampling_params = group[0][1]["kwargs"]["sampling_params"]
-                        # 批量生成
                         responses = self.llm_instance.generate(
                             prompts=prompts, sampling_params=sampling_params)
                         # 分发结果
@@ -300,6 +298,9 @@ class LLMManager:
 
         self.AGENT_MAX_OUTPUT_TOKENS: int = agent_max_output_tokens
         self.MAX_EXPECTED_REQUESTS: int = max_expected_requests
+
+        # Tokenizer缓存：同一个model_name共享同一个tokenizer实例
+        self.tokenizers: Dict[str, AutoTokenizer] = {}
 
     def _load_config(self):
         """加载local_llm.yaml配置"""
@@ -578,6 +579,75 @@ class LLMManager:
         logger.info(f"成功移除使用次数最少的LLM: {least_used_llm}")
         return least_used_llm, True
 
+    def _get_model_path(self, llm_name: str) -> str:
+        """获取模型路径（公共方法，供get_llm_process和get_tokenizer复用）
+
+        Args:
+            llm_name: LLM名称
+
+        Returns:
+            模型路径
+        """
+        if 'finetuned' in llm_name:  # finetuned generator model
+            assert 'EPOCH' in llm_name, "Finetuned generator model name must contain epoch number, model name: " + llm_name
+            assert 'ZCP' in llm_name, "Finetuned generator model name must contain zcp, model name: " + llm_name
+            data_set, zcp, epoch = parse_finetuned_model_name(llm_name)
+            if zcp is None or epoch is None:
+                epoch = llm_name.split("EPOCH")[-1]
+                zcp = llm_name[llm_name.index(
+                    'ZCP')+3:llm_name.index('EPOCH')-1]
+            with open("config/generator_config.yaml", "r") as file:
+                generator_config = yaml.safe_load(file)
+            candidate_paths = []
+            if data_set:
+                candidate_paths.append(
+                    finetuned_model_path(data_set, zcp, epoch))
+            candidate_paths.append(legacy_finetuned_model_path(zcp, epoch))
+            model_path = resolve_existing_path(
+                candidate_paths[0], candidate_paths[1:])
+        else:
+            model_config: dict = self.config.get("models").get(llm_name)
+            if not model_config:
+                raise ValueError(f"配置中未找到模型配置: {llm_name}")
+            model_path = model_config.get("model_path")
+
+        return model_path
+
+    def get_tokenizer(self, llm_name: Optional[str] = None) -> Optional[AutoTokenizer]:
+        """获取tokenizer实例（统一管理，同一个model_name共享同一个tokenizer）
+
+        Args:
+            llm_name: LLM名称，None则使用配置中的默认模型
+
+        Returns:
+            tokenizer实例，如果加载失败则返回None
+        """
+        # 确定要使用的LLM名称
+        if llm_name is None:
+            llm_name = self.config.get("default_llm")
+
+        if llm_name == 'random':
+            if not self.instantiated_llms:
+                logger.warning("当前没有可用的LLM实例（llm池为空），无法获取tokenizer")
+                return None
+            # 任意选择一个已有llm_name
+            llm_name = next(iter(self.instantiated_llms))
+
+        # 如果已经缓存了tokenizer，直接返回
+        if llm_name in self.tokenizers:
+            return self.tokenizers[llm_name]
+
+        # 首次加载tokenizer
+        try:
+            model_path = self._get_model_path(llm_name)
+            tokenizer = AutoTokenizer.from_pretrained(model_path)
+            self.tokenizers[llm_name] = tokenizer
+            logger.info(f"成功加载并缓存tokenizer: {llm_name} (路径: {model_path})")
+            return tokenizer
+        except Exception as e:
+            logger.warning(f"加载tokenizer失败: {llm_name}, 错误: {e}，将返回None")
+            return None
+
     def get_llm_process(self, llm_name: Optional[str] = None, oom_retry_start_time: Optional[float] = None) -> Tuple[str, Dict[str, Any]]:
         """获取或初始化LLM进程
 
@@ -601,31 +671,21 @@ class LLMManager:
             # 任意选择一个已有llm_name
             llm_name = next(iter(self.instantiated_llms))
 
+        # 使用公共方法获取模型路径
+        model_path = self._get_model_path(llm_name)
+
+        # 获取模型配置（用于后续初始化）
         if 'finetuned' in llm_name:  # finetuned generator model
-            assert 'EPOCH' in llm_name, "Finetuned generator model name must contain epoch number, model name: " + llm_name
-            assert 'ZCP' in llm_name, "Finetuned generator model name must contain zcp, model name: " + llm_name
-            data_set, zcp, epoch = parse_finetuned_model_name(llm_name)
-            if zcp is None or epoch is None:
-                epoch = llm_name.split("EPOCH")[-1]
-                zcp = llm_name[llm_name.index(
-                    'ZCP')+3:llm_name.index('EPOCH')-1]
             with open("config/generator_config.yaml", "r") as file:
                 generator_config = yaml.safe_load(file)
-            candidate_paths = []
-            if data_set:
-                candidate_paths.append(
-                    finetuned_model_path(data_set, zcp, epoch))
-            candidate_paths.append(legacy_finetuned_model_path(zcp, epoch))
-            generator_model_path = resolve_existing_path(
-                candidate_paths[0], candidate_paths[1:])
             model_config = {
-                "model_path": generator_model_path,
+                "model_path": model_path,
                 "max_model_len": generator_config["max_model_len"],
             }
         else:
             model_config: dict = self.config.get("models").get(llm_name)
-        if not model_config:
-            raise ValueError(f"配置中未找到模型配置: {llm_name}")
+            if not model_config:
+                raise ValueError(f"配置中未找到模型配置: {llm_name}")
 
         # 如果llm_name已实例化，直接返回并更新使用次数
         if llm_name and llm_name in self.instantiated_llms:
