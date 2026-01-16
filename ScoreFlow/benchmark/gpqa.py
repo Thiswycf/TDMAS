@@ -65,6 +65,8 @@ class GPQABenchmark(BaseBenchmark):
         return problem.get("id", "")
 
     async def direct_judge(self, predicted, problem):
+        if predicted is None:
+            return 0.0
         prompt = (
             "Given the question: " + problem["question"] +
             "And the answer: " + problem["answer"] +

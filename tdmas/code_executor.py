@@ -138,7 +138,7 @@ async def execute_python_code(code: str, timeout: int = 30) -> Tuple[Optional[st
             if process.is_alive():
                 process.kill()  # 如果还在运行，强制杀死
                 await loop.run_in_executor(None, lambda: process.join(timeout=1))
-            return None, f"执行超时（>{timeout}秒）", False
+            return None, f"execution timeout (>{timeout}s)", False
         
         # 进程已完成，获取结果
         if not result_queue.empty():
@@ -146,7 +146,7 @@ async def execute_python_code(code: str, timeout: int = 30) -> Tuple[Optional[st
             return output, error, success
         else:
             # 进程异常退出但没有结果
-            return None, "进程异常退出", False
+            return None, "process exited abnormally", False
             
     except Exception as e:
         # 确保进程被终止
@@ -158,7 +158,7 @@ async def execute_python_code(code: str, timeout: int = 30) -> Tuple[Optional[st
                 process.kill()
                 await loop.run_in_executor(None, lambda: process.join(timeout=1))
         import traceback
-        return None, f"执行出错: {type(e).__name__}: {str(e)}\n{traceback.format_exc()}", False
+        return None, f"execution error: {type(e).__name__}: {str(e)}\n{traceback.format_exc()}", False
 
 
 async def extract_and_execute_code(text: str, timeout: int = 30, max_concurrent_execute_code: int = 128) -> Tuple[Optional[str], Optional[str], bool]:

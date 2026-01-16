@@ -62,7 +62,7 @@ class VLLMAdapter():
         return any(k in model_name for k in keywords)
 
     # Implement generate method for compatibility with generate.py
-    def generate(self, prompts: List[str] | List[List[Dict[str, str]]], sampling_params: SamplingParams):
+    def generate(self, prompts: Union[List[str], List[List[Dict[str, str]]]], sampling_params: SamplingParams):
         """Generate responses for a list of prompts
 
         Args:
