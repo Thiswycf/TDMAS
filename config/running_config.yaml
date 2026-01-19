@@ -1,7 +1,7 @@
 # running configuration
 
 # general
-dataset: GPQA # datasets: GSM8K, AIME24, GPQA
+dataset: AIME24 # datasets: GSM8K, AIME24, GPQA
 # task_type: full_pipeline # full_pipeline, infer_only, train_only
 # start_epoch: 0 # start epoch
 # end_epoch: 5 # end epoch
@@ -29,8 +29,9 @@ similarity_threshold: 0.8 # similarity threshold for preference pairs
 preference_pairs_limit: 128 # preference pairs per epoch
 
 # test
+limit: 1 # limit samples to rapid test (problems number)
 # limit: 128 # limit samples to rapid test (problems number)
-limit: 10000 # No limit
+# limit: 10000 # No limit
 
 # system
 max_concurrent_request: 512 # max concurrent requests to the LLM

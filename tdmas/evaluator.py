@@ -51,7 +51,7 @@ class Evaluator:
 
         # 为每个问题创建独立的MAS实例，避免并发时的状态污染
         mas = MultiAgentSystem(self.model_name, temperature=self.temperature)
-        result = await mas.solve_problem_recursive(
+        result = await mas.solve_problem(
             question_text,
             max_depth=max_depth,
             max_loop=max_loop,
@@ -63,7 +63,7 @@ class Evaluator:
         final = result.get('final', False)
 
         if not final:
-            logger.warning(f"Evaluation failed, problem_id: {self.benchmark.get_problem_id(problem)}, reason: {result.get('reason', '')}, answer: {answer}")
+            logger.warning(f"Evaluation failed, problem_id: {self.benchmark.get_problem_id(problem)}, reason: {result.get('reason', '')}")
             return None
 
         # 计算损失

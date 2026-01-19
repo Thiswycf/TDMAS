@@ -53,10 +53,6 @@ class VLLMAdapter():
 
     @staticmethod
     def needs_chat_template(model_name: str):
-        if 'finetuned' in model_name:  # finetune generator model
-            with open("config/generator_config.yaml", "r") as file:
-                generator_config = yaml.safe_load(file)
-            model_name = generator_config["model"]
         model_name = model_name.lower()
         keywords = ["chat", "instruct", "qwen", "glm", "yi"]
         return any(k in model_name for k in keywords)

@@ -6,14 +6,14 @@
 import asyncio
 from typing import Dict, List, Optional, Tuple, Any, Union
 from vllm import SamplingParams
-import traceback
+from copy import deepcopy
 
 from metagpt.logs import logger
 from utils.llm_manager import get_global_llm_manager
 from utils.VLLMAdapter import VLLMAdapter
 from .prompts import format_first_question_prompt, format_reply_prompt, format_non_first_question_prompt, format_debug_prompt
 from .parser import parse_agent_response, is_response_truncated
-from .code_executor import extract_python_code, extract_and_execute_code
+from .code_executor import extract_and_execute_code
 
 
 class Agent:
@@ -30,13 +30,11 @@ class Agent:
     def __init__(
         self,
         mas: "MultiAgentSystem",
-        question: str,
         depth: int = 0,
         parent: Optional["Agent"] = None,
         use_chat_template: bool = True,
     ) -> None:
         self.mas = mas
-        self.question = question
         self.depth = depth
         self.parent = parent
 
@@ -60,19 +58,18 @@ class Agent:
     def _record_turn(
         self,
         response_text: str,
-        parsed: Dict[str, Any],
         input_tokens: int,
         output_tokens: int,
     ) -> None:
         """记录本 agent 的一轮对话，同时也追加到 MAS 的全局历史中。"""
+        output_id = self.get_next_output_id()
         turn_record = {
+            "output_id": output_id,
             "agent_depth": self.depth,
-            "agent_id": id(self),
-            "turn": len(self.conversation_history) + 1,
-            "question": self.question,
-            "prompt": self.input_conversation[-1]["content"] if self.use_chat_template else self.input_conversation[-1],
+            "turn": self.turn_to_superior,
+            "prompt": deepcopy(self.input_conversation),
+            "use_chat_template": self.use_chat_template,
             "response": response_text,
-            "parsed": parsed,
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,
         }
@@ -82,6 +79,7 @@ class Agent:
             self.input_conversation.append({"role": "assistant", "content": response_text})
         else:
             self.input_conversation.append(response_text)
+        return output_id
 
     def _update_scores(self, parsed: Dict[str, Any]) -> None:
         """根据解析结果更新本 agent 及 MAS 的打分记录。"""
@@ -100,8 +98,18 @@ class Agent:
         """代理 MAS 统一的 LLM 调用，方便未来在 Agent 级别扩展额外信息。"""
         return await self.mas._call_llm(prompt)
 
+    def get_next_output_id(self) -> str:
+        """获取下一个唯一ID"""
+        return self.mas.get_next_output_id()
+
+    def record_output_id_score(self, output_id: str, score: float):
+        """记录输出id的打分"""
+        self.mas.record_output_id_score(output_id, score)
+
     async def solve(
         self,
+        question: str,
+        source_id: str,
         max_depth: int = 5,
         max_loop: int = 5,
         max_debug_attempts: int = 2,
@@ -122,7 +130,9 @@ class Agent:
 
         if self.depth >= max_depth:
             logger.warning(f"达到最大递归深度 {max_depth}，停止递归（depth={self.depth}）")
+            self.record_output_id_score(source_id, 0.0)
             return {
+                "output_id": self.get_next_output_id(),
                 "answer": "",
                 "score": 0.0,
                 "evaluation": "You CANNOT break down the problem any further because the maximum depth of decomposition has been reached. You CANNOT ask this subquestion any further. That means you have to answer the question given directly.",
@@ -133,11 +143,11 @@ class Agent:
         # 1. 构造当前轮的首个 prompt
         # 1.1 第一次接收上级的提问
         if self.turn_to_superior == 1:
-            self.input_conversation = format_first_question_prompt(self.question, use_chat_template=self.use_chat_template)
+            self.input_conversation = format_first_question_prompt(question, use_chat_template=self.use_chat_template)
         # 1.2 非第一次接收上级的提问（需要返工）
         else:
             self.input_conversation = format_non_first_question_prompt(
-                self.question,
+                question,
                 self.input_conversation,
                 feedback,
                 use_chat_template=self.use_chat_template,
@@ -151,14 +161,14 @@ class Agent:
             parsed_response = parse_agent_response(response_text)
 
             # 记录对话与打分（自己给上级问题的打分/下级回复的打分）
-            self._record_turn(response_text, parsed_response, input_tokens, output_tokens)
-            self._update_scores(parsed_response)
+            output_id = self._record_turn(response_text, input_tokens, output_tokens)
 
             # 2. 若本轮直接给出答案，则跳出循环返回答案与反馈
             if parsed_response.get("type") == "answer":
                 answer = parsed_response.get("answer", "")
                 saved_score = parsed_response.get("score")
                 saved_evaluation = parsed_response.get("evaluation")
+                self.record_output_id_score(source_id, saved_score)
                 
                 # 检查答案是否为代码
                 result, error, is_code = await extract_and_execute_code(answer)
@@ -166,6 +176,9 @@ class Agent:
                     # 进行调试（最多 max_debug_attempts 次）
                     debug_attempts = 0
                     while error is not None and debug_attempts < max_debug_attempts:
+                        # 代码编写出现错误，打分
+                        self.record_output_id_score(output_id, 0.0)
+
                         last_debug_result = result  # 保存最后一次调试返回的答案
                         debug_attempts += 1
                         logger.info(f"开始第 {debug_attempts}/{max_debug_attempts} 次代码调试（depth={self.depth}）")
@@ -183,7 +196,7 @@ class Agent:
                         debug_parsed_response = parse_agent_response(debug_response_text)
                         
                         # 记录调试对话
-                        self._record_turn(debug_response_text, debug_parsed_response, debug_input_tokens, debug_output_tokens)
+                        output_id = self._record_turn(debug_response_text, debug_input_tokens, debug_output_tokens)
                         
                         # 提取调试后的代码
                         answer = debug_parsed_response.get("answer", "")
@@ -208,6 +221,7 @@ class Agent:
                 # 当前问题已经"提交给上级"（有了完整答案），不再需要子 agent
                 self._clear_children()
                 return {
+                    "output_id": output_id,
                     "answer": result,
                     "score": saved_score,
                     "evaluation": saved_evaluation,
@@ -227,7 +241,6 @@ class Agent:
                     if sub_id not in self.children:
                         self.children[sub_id] = Agent(
                             self.mas,
-                            subq["question"],
                             depth=self.depth + 1,
                             parent=self,
                             use_chat_template=self.use_chat_template,
@@ -241,26 +254,36 @@ class Agent:
 
                 sub_tasks = []
                 for child, subq in zip(active_children, subquestions):
-                    feedback = (subquestion_scores.get(subq["id"]), subquestion_evaluations.get(subq["id"]))
+                    subq_score = subquestion_scores.get(subq["id"])
+                    subq_evaluation = subquestion_evaluations.get(subq["id"])
+                    feedback = (subq_score, subq_evaluation)
                     if feedback[0] is None or feedback[1] is None:
                         feedback = None
+                    if subq_score:
+                        assert 'subq_id_subq_source_ids_dict' in locals() and subq_id_subq_source_ids_dict.get(subq["id"]), f"subq_id_subq_source_ids_dict 未定义或子问题ID为空，子问题ID：{subq['id']}"
+                        subq_source_id = subq_id_subq_source_ids_dict[subq["id"]]
+                        self.record_output_id_score(subq_source_id, subq_score)
                     sub_tasks.append(
                         child.solve(
+                            question=question,
+                            source_id=output_id,
                             max_depth=max_depth,
                             max_loop=max_loop,
-                            feedback=feedback,
                             max_debug_attempts=max_debug_attempts,
+                            feedback=feedback,
                         )
                     )
 
                 sub_results = await asyncio.gather(*sub_tasks)
+
+                subq_id_subq_source_ids_dict = {resp.get("subq_id"): resp.get("output_id") for resp in sub_results}
 
                 # 3.2 读取子问题解答与反馈，汇总为回复提示词需要的格式
                 formatted_subquestion_replies = []
                 for subq, resp in zip(subquestions, sub_results):
                     formatted_subquestion_replies.append(
                         {
-                            "id": subq["id"],
+                            "subq_id": subq["id"],
                             "question": subq["question"],
                             "answer": resp.get("answer", ""),
                             "score": resp.get("score"),
@@ -269,14 +292,14 @@ class Agent:
                     )
 
                 self.input_conversation = format_reply_prompt(
-                    self.question,
+                    question,
                     formatted_subquestion_replies,
                     len(subquestions),
                     use_chat_template=self.use_chat_template,
                 )
 
             # 如果本轮既没有直接回答，也没有有效子问题分解，则认为状态未知
-            if parsed_response.get("type") not in ["answer", "subquestions"] or not parsed_response.get("subquestions"):
+            else:
                 # 检查响应是否被截断
                 if is_response_truncated(response_text, parsed_response):
                     if len(response_text) < 1024:
@@ -284,6 +307,7 @@ class Agent:
                             f"问题在第 {turn_to_subordinates} 轮循环中未得到有效分解或回答（depth={self.depth}），因为响应被截断。响应文本长度: {len(response_text)}"
                         )
                     return {
+                        "output_id": output_id,
                         "answer": "",
                         "final": False,
                         "reason": "response_truncated",
@@ -296,6 +320,7 @@ class Agent:
 
         # 达到最大循环次数或未知状态，返回当前状态
         return {
+            "output_id": output_id,
             "answer": "",
             "final": False,
             "reason": "unknown_state",
@@ -332,8 +357,11 @@ class MultiAgentSystem:
         self.total_input_tokens = 0
         self.total_output_tokens = 0
         
-        # 用于跟踪所有打分
-        self.all_scores: List[int] = []
+        # 用于为每个输出分配id，方便后续跟踪
+        self.output_id_counter = 0
+        
+        # 对每个id的打分记录
+        self.output_id_scores: Dict[str, List[float]] = {}
         
         # 用于跟踪全局对话历史（聚合所有 Agent）
         self.conversation_history: List[Dict[str, Any]] = []
@@ -343,6 +371,15 @@ class MultiAgentSystem:
         
         # 从LLMManager获取tokenizer（统一管理，避免重复创建）
         self.tokenizer = get_global_llm_manager().get_tokenizer(self.model_name)
+
+    def get_next_output_id(self) -> str:
+        """获取下一个输出id"""
+        self.output_id_counter += 1
+        return f"output_{self.output_id_counter}"
+
+    def record_output_id_score(self, output_id: str, score: float):
+        """记录输出id的打分"""
+        self.output_id_scores.setdefault(output_id, []).append(score)
     
     async def _call_llm(self, prompt: Union[str, List[Dict[str, str]]]) -> Tuple[str, int, int]:
         """调用LLM并返回响应和token消耗
@@ -426,7 +463,7 @@ class MultiAgentSystem:
         
         return response_text, int(input_tokens_count), int(output_tokens_count)
     
-    async def solve_problem_recursive(
+    async def solve_problem(
         self,
         question: str,
         max_depth: int = 5,
@@ -435,13 +472,23 @@ class MultiAgentSystem:
     ) -> Dict[str, Any]:
         """递归解决一个问题（对外保持原有接口），由根 Agent 完成实际工作。"""
         # 创建根 Agent
-        root_agent = Agent(self, question=question, depth=0, parent=None, use_chat_template=self.use_chat_template)
-        result = await root_agent.solve(max_depth=max_depth, max_loop=max_loop, max_debug_attempts=max_debug_attempts)
+        root_agent = Agent(
+            self,
+            depth=0,
+            parent=None,
+            use_chat_template=self.use_chat_template
+        )
+        result = await root_agent.solve(
+            question=question,
+            source_id=self.get_next_output_id(),
+            max_depth=max_depth,
+            max_loop=max_loop,
+            max_debug_attempts=max_debug_attempts
+        )
 
         # 在返回结果中补充全局统计信息
         result.update(
             {
-                "all_scores": self.all_scores.copy(),
                 "total_input_tokens": self.total_input_tokens,
                 "total_output_tokens": self.total_output_tokens,
                 "conversation_history": self.conversation_history.copy(),

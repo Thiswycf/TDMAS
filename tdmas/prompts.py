@@ -164,7 +164,7 @@ def format_reply_prompt(original_question: str, subquestion_replies: list, num_s
     """
     reply_texts = []
     for i, reply in enumerate(subquestion_replies, 1):
-        reply_text = f"{i}. Sub-question {reply.get('id', i)}: {reply.get('question', '')}\n"
+        reply_text = f"{i}. Sub-question {reply.get('subq_id', i)}: {reply.get('question', '')}\n"
         reply_text += f"   Answer: {reply.get('answer', '')}\n"
         reply_text += f"   Score: {reply.get('score', 'N/A')}\n"
         reply_text += f"   Evaluation: {reply.get('evaluation', 'N/A')}"
