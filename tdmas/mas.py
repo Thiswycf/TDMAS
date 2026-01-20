@@ -4,16 +4,18 @@
 """
 
 import asyncio
+import traceback
 from typing import Dict, List, Optional, Tuple, Any, Union
 from vllm import SamplingParams
 from copy import deepcopy
 
 from metagpt.logs import logger
-from utils.llm_manager import get_global_llm_manager
-from utils.VLLMAdapter import VLLMAdapter
+from ScoreFlow.benchmark.benchmark import BaseBenchmark
 from .prompts import format_first_question_prompt, format_reply_prompt, format_non_first_question_prompt, format_debug_prompt
 from .parser import parse_agent_response, is_response_truncated
 from .code_executor import extract_and_execute_code
+from utils.VLLMAdapter import VLLMAdapter
+from utils.llm_manager import get_global_llm_manager
 
 
 class Agent:
@@ -33,6 +35,10 @@ class Agent:
         depth: int = 0,
         parent: Optional["Agent"] = None,
         use_chat_template: bool = True,
+        max_depth: int = 5,
+        max_loop: int = 5,
+        max_debug_attempts: int = 2,
+        max_concurrent_execute_code: int = 128,
     ) -> None:
         self.mas = mas
         self.depth = depth
@@ -55,6 +61,14 @@ class Agent:
         # 是否使用聊天模板
         self.use_chat_template = use_chat_template
 
+        # 子问题id到子问题回复id的映射
+        self.subq_id_subq_reply_id_dict: Dict[int, str] = {}
+
+        self.max_depth = max_depth
+        self.max_loop = max_loop
+        self.max_debug_attempts = max_debug_attempts
+        self.max_concurrent_execute_code = max_concurrent_execute_code
+
     def _record_turn(
         self,
         response_text: str,
@@ -68,8 +82,8 @@ class Agent:
             "agent_depth": self.depth,
             "turn": self.turn_to_superior,
             "prompt": deepcopy(self.input_conversation),
-            "use_chat_template": self.use_chat_template,
             "response": response_text,
+            "use_chat_template": self.use_chat_template,
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,
         }
@@ -80,15 +94,6 @@ class Agent:
         else:
             self.input_conversation.append(response_text)
         return output_id
-
-    def _update_scores(self, parsed: Dict[str, Any]) -> None:
-        """根据解析结果更新本 agent 及 MAS 的打分记录。"""
-        scores = parsed.get("scores", [])
-        if self.turn_to_superior == 1:
-            self.scores_to_superior.extend(scores)
-        else:
-            self.scores_to_subordinates.extend(scores)
-        self.mas.all_scores.extend(scores)
 
     def _clear_children(self) -> None:
         """释放（解散）当前 agent 的所有下级 agent。"""
@@ -102,17 +107,14 @@ class Agent:
         """获取下一个唯一ID"""
         return self.mas.get_next_output_id()
 
-    def record_output_id_score(self, output_id: str, score: float):
+    def record_output_id_score(self, output_id: str, score: float, type: str):
         """记录输出id的打分"""
-        self.mas.record_output_id_score(output_id, score)
+        self.mas.record_output_id_score(output_id, score, type)
 
     async def solve(
         self,
         question: str,
         source_id: str,
-        max_depth: int = 5,
-        max_loop: int = 5,
-        max_debug_attempts: int = 2,
         feedback: Optional[Tuple[float, str]] = None,
     ) -> Dict[str, Any]:
         """递归、循环地解决当前 Agent 的问题，直到返回答案或者达到最大次数。
@@ -128,9 +130,10 @@ class Agent:
         else:
             assert self.input_conversation and feedback is not None, "For non-first turns to superior, input_conversation must not be empty and feedback must not be None. " + f"Got input_conversation={self.input_conversation} and feedback={feedback}"
 
-        if self.depth >= max_depth:
-            logger.warning(f"达到最大递归深度 {max_depth}，停止递归（depth={self.depth}）")
-            self.record_output_id_score(source_id, 0.0)
+        if self.depth >= self.max_depth:
+            logger.warning(f"达到最大递归深度 {self.max_depth}，停止递归（depth={self.depth}）")
+            # 这是自己对问题的评价（下级对上级的评价，一致性信号）
+            self.record_output_id_score(source_id, 0.0, "consistency")
             return {
                 "output_id": self.get_next_output_id(),
                 "answer": "",
@@ -154,7 +157,7 @@ class Agent:
             )
 
         turn_to_subordinates = 0
-        while turn_to_subordinates < max_loop:
+        while turn_to_subordinates < self.max_loop:
             turn_to_subordinates += 1
             
             response_text, input_tokens, output_tokens = await self._call_llm(self.input_conversation)
@@ -162,26 +165,36 @@ class Agent:
 
             # 记录对话与打分（自己给上级问题的打分/下级回复的打分）
             output_id = self._record_turn(response_text, input_tokens, output_tokens)
+            if turn_to_subordinates == 1:
+                saved_score = parsed_response.get("score")
+                saved_evaluation = parsed_response.get("evaluation")
+                # 这是自己对问题的评价（下级对上级的评价，一致性信号）
+                self.record_output_id_score(source_id, saved_score, "consistency")
 
             # 2. 若本轮直接给出答案，则跳出循环返回答案与反馈
             if parsed_response.get("type") == "answer":
                 answer = parsed_response.get("answer", "")
-                saved_score = parsed_response.get("score")
-                saved_evaluation = parsed_response.get("evaluation")
-                self.record_output_id_score(source_id, saved_score)
+                # 记录对子问题回复的打分
+                if turn_to_subordinates > 1:
+                    subquestion_scores = parsed_response.get('subquestion_scores', {})
+                    for subq_id, subq_score in subquestion_scores.items():
+                        subq_source_id = self.subq_id_subq_reply_id_dict[subq_id]
+                        # 这是自己对子问题回复的评价（上级对下级的监督信号）
+                        self.record_output_id_score(subq_source_id, subq_score, "supervision")
                 
                 # 检查答案是否为代码
-                result, error, is_code = await extract_and_execute_code(answer)
+                result, error, is_code = await extract_and_execute_code(answer, max_concurrent_execute_code=self.max_concurrent_execute_code)
                 if is_code and result is not None:
                     # 进行调试（最多 max_debug_attempts 次）
                     debug_attempts = 0
-                    while error is not None and debug_attempts < max_debug_attempts:
+                    while error is not None and debug_attempts < self.max_debug_attempts:
                         # 代码编写出现错误，打分
-                        self.record_output_id_score(output_id, 0.0)
+                        # 这是系统对自己的评价（系统对自己的评价，监督信号）
+                        self.record_output_id_score(output_id, 0.0, "supervision")
 
                         last_debug_result = result  # 保存最后一次调试返回的答案
                         debug_attempts += 1
-                        logger.info(f"开始第 {debug_attempts}/{max_debug_attempts} 次代码调试（depth={self.depth}）")
+                        logger.info(f"开始第 {debug_attempts}/{self.max_debug_attempts} 次代码调试（depth={self.depth}）")
                         
                         # 构造调试 prompt
                         error_message = error[:1000] if error else "Unknown error"  # 限制错误信息长度
@@ -200,7 +213,7 @@ class Agent:
                         
                         # 提取调试后的代码
                         answer = debug_parsed_response.get("answer", "")
-                        result, error, is_code = await extract_and_execute_code(answer)
+                        result, error, is_code = await extract_and_execute_code(answer, max_concurrent_execute_code=self.max_concurrent_execute_code)
                         
                         if not is_code:
                             logger.warning(f"第 {debug_attempts} 次调试未返回有效代码，使用原始代码")
@@ -212,6 +225,8 @@ class Agent:
                             break
                         else:
                             logger.warning(f"第 {debug_attempts} 次调试后代码仍执行失败：{error[:200] if error else 'Unknown error'}")
+
+                        pass
                         
                     if error is not None:
                         # 所有调试尝试都失败，保留最后一次尝试的代码作为答案
@@ -232,10 +247,21 @@ class Agent:
             # 3. 若本轮选择分解为子问题，则进入子问题处理流程
             elif parsed_response.get("type") == "subquestions" and parsed_response.get("subquestions"):
                 subquestions = parsed_response["subquestions"]
+                
+                # 检查subquestions中没有重复的subq["id"]
+                subq_ids = [subq["id"] for subq in subquestions]
+                assert len(subq_ids) == len(set(subq_ids)), f"subquestions contains duplicate ids: {subq_ids}"
+
                 logger.info(f"问题被分解为 {len(subquestions)} 个子问题（depth={self.depth}, loop={turn_to_subordinates}）")
 
+
+                # 3.1 将子问题分发给下级（每个子 agent 自行用自己的循环进行多轮）
+                # 记录对子问题回复的打分
+                subquestion_scores = parsed_response['subquestion_scores']
+                subquestion_evaluations = parsed_response['subquestion_evaluations']
+
+                sub_tasks = []
                 # 为每个子问题创建或复用下级 Agent（按 id 复用，实现追问）
-                active_children: List[Agent] = []
                 for subq in subquestions:
                     sub_id = subq["id"]
                     if sub_id not in self.children:
@@ -244,46 +270,51 @@ class Agent:
                             depth=self.depth + 1,
                             parent=self,
                             use_chat_template=self.use_chat_template,
+                            max_depth=self.max_depth,
+                            max_loop=self.max_loop,
+                            max_debug_attempts=self.max_debug_attempts,
+                            max_concurrent_execute_code=self.max_concurrent_execute_code,
                         )
-                    active_children.append(self.children[sub_id])
+                    child = self.children[sub_id]
 
-                # 3.1 将子问题分发给下级（每个子 agent 自行用自己的循环进行多轮）
-                # 为每个子问题提取对应feedback（从parsed_response中提取subquestion_scores和subquestion_evaluations，如果有的话，否则用全体的score/evaluation）
-                subquestion_scores = parsed_response.get('subquestion_scores', {})
-                subquestion_evaluations = parsed_response.get('subquestion_evaluations', {})
-
-                sub_tasks = []
-                for child, subq in zip(active_children, subquestions):
+                    # 这是自己对子问题回复的评价，第一轮为空
                     subq_score = subquestion_scores.get(subq["id"])
                     subq_evaluation = subquestion_evaluations.get(subq["id"])
                     feedback = (subq_score, subq_evaluation)
-                    if feedback[0] is None or feedback[1] is None:
+                    if subq_score is None or subq_evaluation is None:
                         feedback = None
                     if subq_score:
-                        assert 'subq_id_subq_source_ids_dict' in locals() and subq_id_subq_source_ids_dict.get(subq["id"]), f"subq_id_subq_source_ids_dict 未定义或子问题ID为空，子问题ID：{subq['id']}"
-                        subq_source_id = subq_id_subq_source_ids_dict[subq["id"]]
-                        self.record_output_id_score(subq_source_id, subq_score)
-                    sub_tasks.append(
-                        child.solve(
-                            question=question,
-                            source_id=output_id,
-                            max_depth=max_depth,
-                            max_loop=max_loop,
-                            max_debug_attempts=max_debug_attempts,
-                            feedback=feedback,
-                        )
-                    )
+                        assert self.subq_id_subq_reply_id_dict.get(subq["id"]), f"子问题ID为空，子问题ID：{subq['id']}"
+                        subq_source_id = self.subq_id_subq_reply_id_dict[subq["id"]]
+                        # 这是自己对子问题回复的评价（上级对下级的监督信号）
+                        self.record_output_id_score(subq_source_id, subq_score, "supervision")
+                    # Wrap child.solve in a coroutine that tracks subq["id"] to prevent 'was never awaited'
+                    elif child.turn_to_superior > 0:
+                        raise ValueError(f"子问题ID为 {subq['id']} 的子问题被多次追问，但子问题的反馈为空")
+                    async def sub_solve(subq_id: int, child_instance: Agent, *args, **kwargs):
+                        # Await the solve and bundle id for gathering later
+                        r = await child_instance.solve(*args, **kwargs)
+                        return (subq_id, r)
+                    sub_tasks.append(sub_solve(
+                        subq["id"],
+                        child,
+                        question=subq['question'],
+                        source_id=output_id,
+                        feedback=feedback,
+                    ))
 
                 sub_results = await asyncio.gather(*sub_tasks)
-
-                subq_id_subq_source_ids_dict = {resp.get("subq_id"): resp.get("output_id") for resp in sub_results}
+                
+                # 更新子问题id到子问题回复id的映射
+                for subq_id, resp in sub_results:
+                    self.subq_id_subq_reply_id_dict[subq_id] = resp.get("output_id")
 
                 # 3.2 读取子问题解答与反馈，汇总为回复提示词需要的格式
                 formatted_subquestion_replies = []
-                for subq, resp in zip(subquestions, sub_results):
+                for subq, (subq_id, resp) in zip(subquestions, sub_results):
                     formatted_subquestion_replies.append(
                         {
-                            "subq_id": subq["id"],
+                            "subq_id": subq_id,
                             "question": subq["question"],
                             "answer": resp.get("answer", ""),
                             "score": resp.get("score"),
@@ -293,6 +324,7 @@ class Agent:
 
                 self.input_conversation = format_reply_prompt(
                     question,
+                    self.input_conversation,
                     formatted_subquestion_replies,
                     len(subquestions),
                     use_chat_template=self.use_chat_template,
@@ -306,6 +338,7 @@ class Agent:
                         logger.warning(
                             f"问题在第 {turn_to_subordinates} 轮循环中未得到有效分解或回答（depth={self.depth}），因为响应被截断。响应文本长度: {len(response_text)}"
                         )
+                    self._clear_children()
                     return {
                         "output_id": output_id,
                         "answer": "",
@@ -314,10 +347,12 @@ class Agent:
                     }
                 else:
                     logger.warning(f"问题在第 {turn_to_subordinates} 轮循环中未得到有效分解或回答（depth={self.depth}）")
-                self._clear_children()
                 break
+                
+            pass
 
 
+        self._clear_children()
         # 达到最大循环次数或未知状态，返回当前状态
         return {
             "output_id": output_id,
@@ -337,16 +372,31 @@ class MultiAgentSystem:
     - 创建并调度根 Agent。
     """
     
-    def __init__(self, model_name: str, temperature: float = 0.7, max_output_tokens: int = 2048):
+    def __init__(self, model_name: str,
+        temperature: float = 0.7,
+        max_output_tokens: int = 2048,
+        max_depth: int = 5,
+        max_loop: int = 5,
+        max_debug_attempts: int = 2,
+        max_concurrent_execute_code: int = 128,
+    ):
         """
         Args:
             model_name: LLM模型名称
             temperature: 采样温度
             max_output_tokens: 最大输出token数
+            max_depth: 最大递归深度
+            max_loop: 最大循环次数
+            max_debug_attempts: 最大调试次数
+            max_concurrent_execute_code: 最大并发执行代码数
         """
         self.model_name = model_name
         self.temperature = temperature
         self.max_output_tokens = max_output_tokens
+        self.max_depth = max_depth
+        self.max_loop = max_loop
+        self.max_debug_attempts = max_debug_attempts
+        self.max_concurrent_execute_code = max_concurrent_execute_code
         self.sampling_params = SamplingParams(
             temperature=temperature,
             top_p=0.95,
@@ -361,14 +411,15 @@ class MultiAgentSystem:
         self.output_id_counter = 0
         
         # 对每个id的打分记录
-        self.output_id_scores: Dict[str, List[float]] = {}
+        self.output_id_supervision_scores: Dict[str, List[float]] = {} # 监督信号（来自上级/标签/系统）
+        self.output_id_consistency_scores: Dict[str, List[float]] = {} # 一致性信号（来自下级）
         
         # 用于跟踪全局对话历史（聚合所有 Agent）
         self.conversation_history: List[Dict[str, Any]] = []
 
         # 是否使用聊天模板
         self.use_chat_template = VLLMAdapter.needs_chat_template(self.model_name)
-        
+
         # 从LLMManager获取tokenizer（统一管理，避免重复创建）
         self.tokenizer = get_global_llm_manager().get_tokenizer(self.model_name)
 
@@ -377,9 +428,14 @@ class MultiAgentSystem:
         self.output_id_counter += 1
         return f"output_{self.output_id_counter}"
 
-    def record_output_id_score(self, output_id: str, score: float):
+    def record_output_id_score(self, output_id: str, score: float, type: str):
         """记录输出id的打分"""
-        self.output_id_scores.setdefault(output_id, []).append(score)
+        if type == "supervision":
+            self.output_id_supervision_scores.setdefault(output_id, []).append(score)
+        elif type == "consistency":
+            self.output_id_consistency_scores.setdefault(output_id, []).append(score)
+        else:
+            raise ValueError(f"Invalid score type: {type}. Must be 'supervision' or 'consistency'.")
     
     async def _call_llm(self, prompt: Union[str, List[Dict[str, str]]]) -> Tuple[str, int, int]:
         """调用LLM并返回响应和token消耗
@@ -463,12 +519,45 @@ class MultiAgentSystem:
         
         return response_text, int(input_tokens_count), int(output_tokens_count)
     
+    async def judge(self, answer: str, benchmark: BaseBenchmark, problem: dict) -> bool:
+        """判断答案是否正确
+
+        Args:
+            answer: MAS的回答
+            benchmark: 基准测试对象
+            problem: 问题字典
+
+        Returns:
+            是否正确（True表示正确，False表示错误）
+        """
+
+        try:
+            # 使用benchmark的方法计算得分
+            # 这里假设benchmark有evaluate_problem方法或类似的方法
+            if hasattr(benchmark, 'direct_judge'):
+                import inspect
+                if inspect.iscoroutinefunction(benchmark.direct_judge):
+                    return await benchmark.direct_judge(answer, problem)
+                else:
+                    return benchmark.direct_judge(answer, problem)
+            else:
+                # 如果没有direct_judge方法，使用简单的字符串比较
+                ground_truth = problem.get('answer', '')
+                gt_str = str(ground_truth).strip().lower()
+                answer_str = str(answer).strip().lower()
+                if answer_str == gt_str:
+                    return True
+                else:
+                    return False
+        except Exception as e:
+            logger.warning(f"计算正确性损失时出错: {type(e).__name__}\n{traceback.format_exc()}")
+            return False  # 出错时返回False
+
     async def solve_problem(
         self,
         question: str,
-        max_depth: int = 5,
-        max_loop: int = 5,
-        max_debug_attempts: int = 2,
+        benchmark: BaseBenchmark,
+        problem: dict,
     ) -> Dict[str, Any]:
         """递归解决一个问题（对外保持原有接口），由根 Agent 完成实际工作。"""
         # 创建根 Agent
@@ -476,30 +565,46 @@ class MultiAgentSystem:
             self,
             depth=0,
             parent=None,
-            use_chat_template=self.use_chat_template
+            use_chat_template=self.use_chat_template,
+            max_depth=self.max_depth,
+            max_loop=self.max_loop,
+            max_debug_attempts=self.max_debug_attempts,
+            max_concurrent_execute_code=self.max_concurrent_execute_code
         )
         result = await root_agent.solve(
             question=question,
             source_id=self.get_next_output_id(),
-            max_depth=max_depth,
-            max_loop=max_loop,
-            max_debug_attempts=max_debug_attempts
         )
 
-        # 在返回结果中补充全局统计信息
-        result.update(
-            {
-                "total_input_tokens": self.total_input_tokens,
-                "total_output_tokens": self.total_output_tokens,
-                "conversation_history": self.conversation_history.copy(),
-            }
-        )
+        correctness = await self.judge(result["answer"], benchmark, problem)
+        result["correctness"] = 1.0 if correctness else 0.0
+        output_id = result["output_id"]
+        self.record_output_id_score(output_id, result["correctness"], "supervision")
+
+        # 标记奖励得分
+        for turn_record in self.conversation_history:
+            output_id = turn_record["output_id"]
+            supervision_score = sum(self.output_id_supervision_scores.get(output_id, []))
+            consistency_score = sum(self.output_id_consistency_scores.get(output_id, []))
+            turn_record["supervision_score"] = supervision_score
+            turn_record["consistency_score"] = consistency_score
+
+        # 统计tokens成本
+        self.total_input_tokens = sum(turn["input_tokens"] for turn in self.conversation_history)
+        self.total_output_tokens = sum(turn["output_tokens"] for turn in self.conversation_history)
+
+        # 在返回结果中补充 MAS 信息
+        result.update({
+            "conversation_history": deepcopy(self.conversation_history),
+            "total_input_tokens": self.total_input_tokens,
+            "total_output_tokens": self.total_output_tokens,
+        })
+
         return result
     
     def reset(self):
         """重置状态（用于处理新问题）"""
         self.total_input_tokens = 0
         self.total_output_tokens = 0
-        self.all_scores = []
         self.conversation_history = []
     

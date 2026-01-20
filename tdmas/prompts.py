@@ -144,8 +144,8 @@ Format output requirements as follows:
 
 
 def format_first_question_prompt(question: str,
-                                 use_chat_template: bool = True,
-                                 ) -> Union[List[str], List[Dict[str, str]]]:
+    use_chat_template: bool = True,
+    ) -> Union[List[str], List[Dict[str, str]]]:
     """Format the first question prompt"""
     prompt = FIRST_QUESTION_PROMPT_TEMPLATE.format(question=question)
     if use_chat_template:
@@ -154,11 +154,16 @@ def format_first_question_prompt(question: str,
         return [prompt]
 
 
-def format_reply_prompt(original_question: str, subquestion_replies: list, num_subquestions: int, use_chat_template: bool = True) -> Union[List[str], List[Dict[str, str]]]:
+def format_reply_prompt(original_question: str,
+    previous_conversation: Union[List[str], List[Dict[str, str]]],
+    subquestion_replies: list,
+    num_subquestions: int,
+    use_chat_template: bool = True) -> Union[List[str], List[Dict[str, str]]]:
     """Format the reply prompt
 
     Args:
         original_question: Original question
+        previous_conversation: Previous conversation, each element can be a string (no use chat template) or a dictionary (use chat template)
         subquestion_replies: List of sub-question replies, each element contains sub-question ID, answer, score, and evaluation
         num_subquestions: Number of sub-questions
     """
@@ -182,9 +187,9 @@ def format_reply_prompt(original_question: str, subquestion_replies: list, num_s
         next_id=next_id
     )
     if use_chat_template:
-        return [{"role": "user", "content": prompt}]
+        return previous_conversation + [{"role": "user", "content": prompt}]
     else:
-        return [prompt]
+        return previous_conversation + [prompt]
 
 
 def format_non_first_question_prompt(
@@ -265,6 +270,9 @@ def format_debug_prompt(
     )
 
     # Return multi-round conversation format compatible with VLLMAdapter
+    # - odd number of messages
+    # - roles alternate user/assistant/user/...
+    # - last message is user
     if use_chat_template:
         conversation = previous_conversation + [{"role": "user", "content": user_content}]
     else:

@@ -4,7 +4,7 @@ from typing import Iterable, Literal, Optional, Tuple
 
 TaskType = Literal["optimize", "inference"]
 
-WORKSPACE_ROOT = "scoreflow_workspace"
+WORKSPACE_ROOT = "tdmas_workspace"
 
 
 def workspace_path(*parts: str) -> str:
@@ -77,6 +77,13 @@ def temp_eval_dir(data_set: str, zcp: str) -> str:
 def temp_generate_dir(data_set: str, zcp: str) -> str:
     return workspace_path("temp_gene_workflow_file", data_set, zcp)
 
+def wsft_data_dir(data_set: str, zcp: str) -> str:
+    return workspace_path("output_wsft_data", data_set, zcp)
+
+
+def wsft_data_file(data_set: str, zcp: str, epoch: int | str) -> str:
+    return os.path.join(wsft_data_dir(data_set, zcp), f"wsft_data-{epoch}.pkl")
+
 
 def preference_data_dir(data_set: str, zcp: str) -> str:
     return workspace_path("output_preference_data", data_set, zcp)
@@ -99,11 +106,13 @@ def finetuned_epoch_dir(data_set: str, zcp: str, epoch: int | str) -> str:
 
 
 def finetuned_model_path(data_set: str, zcp: str, epoch: int | str) -> str:
-    return os.path.join(finetuned_epoch_dir(data_set, zcp, epoch), "merged")
+    # return os.path.join(finetuned_epoch_dir(data_set, zcp, epoch), "merged")
+    return os.path.join(finetuned_epoch_dir(data_set, zcp, epoch), "final")
 
 
 def legacy_finetuned_model_path(zcp: str, epoch: int | str) -> str:
-    return workspace_path("finetuned", zcp, str(epoch), "merged")
+    # return workspace_path("finetuned", zcp, str(epoch), "merged")
+    return workspace_path("finetuned", zcp, str(epoch), "final")
 
 
 _FINETUNED_NAME_PATTERN = re.compile(

@@ -2,6 +2,19 @@
 主程序入口
 实现完整的训练pipeline：数据收集、优化、验证
 """
+import os
+import sys
+import yaml
+import json
+import shutil
+import pickle
+import asyncio
+import datetime
+import argparse
+import importlib
+import subprocess
+from typing import Optional
+from termcolor import cprint
 
 from tdmas.evaluator import Evaluator
 from tdmas.preference_data import generate_preference_pairs, save_preference_data
@@ -13,21 +26,11 @@ from utils.path_utils import (
     build_model_name,
     evaluation_output_dir,
     solve_rate_file,
+    ppo_data_dir,
+    ppo_data_file,
 )
 from utils.llm_manager import get_global_llm_manager
-from termcolor import cprint
 from metagpt.logs import logger
-from typing import Optional
-import datetime
-import sys
-import subprocess
-import importlib
-import shutil
-import yaml
-import json
-import argparse
-import asyncio
-import os
 os.environ.setdefault("VLLM_LOGGING_LEVEL", "WARNING")
 os.environ.setdefault("VLLM_CONFIGURE_LOGGING", "0")
 
@@ -120,22 +123,23 @@ async def collect_training_data(
 
     # 计算训练集准确率
     correct_count = 0
-    total_count = 0
+    total_count = len(training_data) * train_ask_num
 
     # 按问题分组统计（每个问题有ask_num个回答，只统计第一个回答的准确率）
     for data in collected_data:
-        correct_count += data.get('correct', 0)
-        total_count += 1
+        assert data["correctness"] == 1.0 or data[
+            "correctness"] == 0.0, f'Got invalid correctness: {data["correctness"]}'
+        correct_count += data["correctness"]
 
     train_accuracy = (correct_count / total_count *
                       100) if total_count > 0 else 0.0
 
     cprint(
-        f"[TDMAS] 训练集准确率 | Epoch {epoch} | Accuracy: {train_accuracy:.4f}% ({correct_count}/{total_count})",
+        f"[TDMAS] 训练集准确率 | Epoch {epoch} | Accuracy: {train_accuracy:.4f}% ({int(correct_count)}/{total_count})",
         color="green"
     )
     logger.info(
-        f"训练集准确率: {train_accuracy:.4f}% ({correct_count}/{total_count})")
+        f"训练集准确率: {train_accuracy:.4f}% ({int(correct_count)}/{total_count})")
 
     # 保存训练集准确率到文件
     result_dir = evaluation_output_dir(dataset, zcp)
@@ -146,10 +150,14 @@ async def collect_training_data(
             f"[{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] | Limit {limit} | Epoch {epoch} | Train Solve Rate: {train_accuracy:.4f}%\n"
         )
 
-    return collected_data
+    training_data = []
+    for data in collected_data:
+        training_data.extend(data["single_problem_train_data"])
+
+    return training_data
 
 
-async def generate_preference_data_from_collected(
+def generate_preference_data_from_collected(
     collected_data: list,
     dataset: str,
     zcp: str,
@@ -180,7 +188,7 @@ async def optimize_model(
 
     # 在独立子进程中运行优化，避免主进程持有CUDA上下文
     trainer_script = os.path.join(
-        os.path.dirname(__file__), "tdmas/optimize.py")
+        os.path.dirname(__file__), "tdmas/wsft_optimize.py")
     cmd = [
         sys.executable,
         trainer_script,
@@ -188,8 +196,6 @@ async def optimize_model(
         dataset,
         "--epoch",
         str(epoch),
-        "--zcp",
-        zcp,
     ]
     if train_only:
         cmd.append("--train_only")
@@ -239,13 +245,25 @@ async def evaluate_model(
         max_debug_attempts=max_debug_attempts
     )
 
-    # 计算准确率
-    accuracy = evaluator.calculate_accuracy(results)
-    accuracy_percentage = accuracy * 100
+    # 计算训练集准确率
+    correct_count = 0
+    total_count = len(test_data) * test_ask_num
+
+    # 按问题分组统计（每个问题有ask_num个回答，只统计第一个回答的准确率）
+    for data in results:
+        assert data["correctness"] == 1.0 or data[
+            "correctness"] == 0.0, f'Got invalid correctness: {data["correctness"]}'
+        correct_count += data["correctness"]
+
+    test_accuracy = (correct_count / total_count *
+                     100) if total_count > 0 else 0.0
 
     cprint(
-        f"[TDMAS] 模型评估完成 | Epoch {epoch} | 测试集准确率: {accuracy_percentage:.4f}%", color="green")
-    logger.info(f"模型评估完成，测试集准确率: {accuracy_percentage:.4f}%")
+        f"[TDMAS] 测试集准确率 | Epoch {epoch} | Accuracy: {test_accuracy:.4f}% ({int(correct_count)}/{total_count})",
+        color="green"
+    )
+    logger.info(
+        f"测试集准确率: {test_accuracy:.4f}% ({int(correct_count)}/{total_count})")
 
     # 保存测试集准确率到文件
     result_dir = evaluation_output_dir(dataset, zcp)
@@ -253,10 +271,10 @@ async def evaluate_model(
     result_file = solve_rate_file(dataset, zcp, "inference")
     with open(result_file, "a") as f:
         f.write(
-            f"[{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] | Limit {limit} | Epoch {epoch} | Test Solve Rate: {accuracy_percentage:.4f}%\n"
+            f"[{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] | Limit {limit} | Epoch {epoch} | Test Solve Rate: {test_accuracy:.4f}%\n"
         )
 
-    return accuracy, results
+    return test_accuracy, results
 
 
 async def run_training_epoch(
@@ -282,36 +300,45 @@ async def run_training_epoch(
     cprint(f"[TDMAS] {'='*10} Epoch {epoch} {'='*10}", color="blue")
 
     # 1. 收集训练数据
-    collected_data = await collect_training_data(
-        model_name,
-        dataset,
-        benchmark,
-        training_data,
-        epoch,
-        limit=limit,
-        max_depth=max_depth,
-        max_concurrent_request=max_concurrent_request,
-        max_concurrent_execute_code=max_concurrent_execute_code,
-        train_ask_num=train_ask_num,
-        max_loop=max_loop,
-        max_debug_attempts=max_debug_attempts,
-        zcp=zcp
-    )
-    get_global_llm_manager().clear_all()
-    cprint("All LLM models have been cleared!", color="green")
-    logger.info("All LLM models have been cleared!")
+    # collected_data = await collect_training_data(
+    #     model_name,
+    #     dataset,
+    #     benchmark,
+    #     training_data,
+    #     epoch,
+    #     limit=limit,
+    #     max_depth=max_depth,
+    #     max_concurrent_request=max_concurrent_request,
+    #     max_concurrent_execute_code=max_concurrent_execute_code,
+    #     train_ask_num=train_ask_num,
+    #     max_loop=max_loop,
+    #     max_debug_attempts=max_debug_attempts,
+    #     zcp=zcp
+    # )
+    # get_global_llm_manager().clear_all()
+    # cprint("All LLM models have been cleared!", color="green")
+    # logger.info("All LLM models have been cleared!")
 
-    # 2. 生成preference data
-    similarity_threshold = config.get('similarity_threshold')
-    preference_pairs_limit = config.get('preference_pairs_limit')
-    await generate_preference_data_from_collected(
-        collected_data,
-        dataset,
-        zcp,
-        epoch,
-        similarity_threshold=similarity_threshold,
-        preference_pairs_limit=preference_pairs_limit
-    )
+    # # # 2. 生成preference data
+    # # similarity_threshold = config.get('similarity_threshold')
+    # # preference_pairs_limit = config.get('preference_pairs_limit')
+    # # generate_preference_data_from_collected(
+    # #     collected_data,
+    # #     dataset,
+    # #     zcp,
+    # #     epoch,
+    # #     similarity_threshold=similarity_threshold,
+    # #     preference_pairs_limit=preference_pairs_limit
+    # # )
+
+    # # 2. 生成PPO training data
+    # ensure_dir(ppo_data_dir(dataset, zcp))
+    # with open(ppo_data_file(dataset, zcp, epoch), 'wb') as f:
+    #     pickle.dump(collected_data, f)
+
+    # cprint(
+    #     f"[TDMAS] weighted-SFT data 生成完成 | Epoch {epoch} | 生成了 {len(collected_data)} 条数据，保存到 {ppo_data_file(dataset, zcp, epoch)}", color="green")
+    # logger.info(f"weighted-SFT data 生成完成，共 {len(collected_data)} 条数据，保存到 {ppo_data_file(dataset, zcp, epoch)}")
 
     # 3. 优化模型
     await optimize_model(epoch, dataset, zcp, train_only=train_only)

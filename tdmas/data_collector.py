@@ -3,11 +3,13 @@
 收集训练数据并计算损失
 """
 
+import traceback
 import asyncio
 from typing import Dict, List
 from metagpt.logs import logger
 from .mas import MultiAgentSystem
-from .loss import calculate_loss
+from .reward import calculate_reward
+from utils.progress import run_tasks_with_progress
 
 
 class DataCollector:
@@ -49,50 +51,33 @@ class DataCollector:
         question_text = self.benchmark.get_graph_input_text(problem)
 
         # 为每个问题创建独立的MAS实例，避免并发时的状态污染
-        mas = MultiAgentSystem(self.model_name, temperature=self.temperature)
-        result = await mas.solve_problem(
-            question_text,
+        mas = MultiAgentSystem(self.model_name,
+            temperature=self.temperature,
             max_depth=max_depth,
             max_loop=max_loop,
             max_debug_attempts=max_debug_attempts,
+            max_concurrent_execute_code=max_concurrent_execute_code,
         )
+        result = await mas.solve_problem(question_text, self.benchmark, problem)
 
-        # 提取答案
-        answer = result.get('answer', '')
-        final = result.get('final', False)
-        if not final:
-            logger.warning(f"Collect failed, problem_id: {self.benchmark.get_problem_id(problem)}, reason: {result.get('reason', '')}, answer: {answer}")
-            return None
-
-        # 计算损失
-        loss_info = calculate_loss(
-            answer=answer,
-            all_scores=result.get('all_scores', []),
-            total_tokens=result.get(
-                'total_input_tokens', 0) + result.get('total_output_tokens', 0),
-            benchmark=self.benchmark,
-            problem=problem
-        )
+        single_problem_train_data = []
+        for turn_record in result["conversation_history"]:
+            single_problem_train_data.append({
+                "prompt": turn_record["prompt"],
+                "response": turn_record["response"],
+                "reward": calculate_reward(turn_record["supervision_score"], turn_record["consistency_score"], turn_record["input_tokens"], turn_record["output_tokens"]),
+            })
 
         # 获取问题ID
         problem_id = self.benchmark.get_problem_id(problem)
 
         return {
-            'problem': problem,
             'problem_id': problem_id,  # 添加problem_id字段便于后续分组
             'question': question_text,
-            'answer': answer,
-            'correct': 1.0 - loss_info['correctness_loss'],
-            'all_scores': result.get('all_scores', []),
-            'total_input_tokens': result.get('total_input_tokens', 0),
-            'total_output_tokens': result.get('total_output_tokens', 0),
-            'loss': loss_info['total_loss'],
-            'correctness_loss': loss_info['correctness_loss'],
-            'consistency_loss': loss_info['consistency_loss'],
-            'token_loss': loss_info['token_loss'],
-            'conversation_history': result.get('conversation_history', []),
-            'final': result.get('final', False),
-            'reason': result.get('reason', '')
+            'correctness': result["correctness"],
+            'total_input_tokens': result["total_input_tokens"],
+            'total_output_tokens': result["total_output_tokens"],
+            'single_problem_train_data': single_problem_train_data,
         }
 
     async def collect_batch(
@@ -135,7 +120,11 @@ class DataCollector:
             for _ in range(train_ask_num):
                 tasks.append(collect_with_semaphore(problem))
 
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+        # 使用通用进度工具，保持返回顺序，并在出现异常时将异常对象写入结果列表
+        results = await run_tasks_with_progress(
+            tasks,
+            desc="Training Data Collection Progress",
+        )
 
         # 过滤掉None和异常结果
         valid_results = []

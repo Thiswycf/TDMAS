@@ -86,29 +86,33 @@ def calculate_token_loss(total_tokens: int, token_weight: float = 1e-6) -> float
 
 async def calculate_loss(
     answer: str,
-    all_scores: List[int],
-    total_tokens: int,
+    supervision_score: int,
+    consistency_score: int,
+    input_tokens: int,
+    output_tokens: int,
     benchmark,
     problem: dict,
-    correctness_weight: float = 1.0,
+    supervision_weight: float = 1.0,
     consistency_weight: float = 0.1,
     token_weight: float = 1e-6
 ) -> dict:
     """计算总损失
     
-    损失 = correctness_weight * 正确性损失 + 
+    损失 = supervision_weight * 监督得分损失 + 
           consistency_weight * 一致性损失 + 
           token_weight * token损失
     
     Args:
         answer: MAS的回答
-        all_scores: 所有打分的列表
-        total_tokens: 总token数
+        supervision_score: 监督得分
+        consistency_score: 一致性得分
+        input_tokens: 输入token数
+        output_tokens: 输出token数
         benchmark: 基准测试对象
         problem: 问题字典
-        correctness_weight: 正确性损失权重
-        consistency_weight: 一致性损失权重
-        token_weight: token损失权重系数
+        supervision_weight: 监督得分权重
+        consistency_weight: 一致性得分权重
+        token_weight: token权重
     
     Returns:
         包含各项损失的字典
