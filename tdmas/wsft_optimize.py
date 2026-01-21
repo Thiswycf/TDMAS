@@ -3,6 +3,11 @@
 
 import os
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+os.environ["fix_mistral_regex"] = "True"
+os.environ["disable_custom_all_reduce"] = "True"
+os.environ["NCCL_IB_DISABLE"] = "True"
+os.environ["NCCL_P2P_DISABLE"] = "True"
+os.environ["NCCL_SOCKET_IFNAME"] = "lo"
 
 import re
 import sys
@@ -81,7 +86,6 @@ class Args:
     per_device_train_batch_size: int = field(default=1)
     gradient_accumulation_steps: int = field(default=8)
     save_steps: int = field(default=200)
-    logging_steps: int = field(default=10)
     max_train_samples: int = field(default=4096)
 
     # Reward processing
@@ -498,7 +502,9 @@ class TrainingMonitor:
 
         # Loss曲线
         if self.losses:
-            axes[0, 0].plot(self.steps, self.losses, 'b-',
+            # 只使用与losses长度匹配的steps部分
+            steps_subset = self.steps[-len(self.losses):]
+            axes[0, 0].plot(steps_subset, self.losses, 'b-',
                             linewidth=1.5, alpha=0.7)
             axes[0, 0].set_xlabel('Step')
             axes[0, 0].set_ylabel('Loss')
@@ -509,13 +515,15 @@ class TrainingMonitor:
                 window = min(50, len(self.losses) // 10)
                 moving_avg = np.convolve(
                     self.losses, np.ones(window)/window, mode='valid')
-                axes[0, 0].plot(self.steps[window-1:], moving_avg, 'r-',
+                axes[0, 0].plot(steps_subset[window-1:], moving_avg, 'r-',
                                 linewidth=2, label=f'Moving Avg (window={window})')
                 axes[0, 0].legend()
 
         # Reward曲线
         if self.rewards:
-            axes[0, 1].plot(self.steps, self.rewards,
+            # 只使用与rewards长度匹配的steps部分
+            steps_subset = self.steps[-len(self.rewards):]
+            axes[0, 1].plot(steps_subset, self.rewards,
                             'g-', linewidth=1.5, alpha=0.7)
             axes[0, 1].set_xlabel('Step')
             axes[0, 1].set_ylabel('Reward')
@@ -525,13 +533,15 @@ class TrainingMonitor:
                 window = min(50, len(self.rewards) // 10)
                 moving_avg = np.convolve(
                     self.rewards, np.ones(window)/window, mode='valid')
-                axes[0, 1].plot(self.steps[window-1:], moving_avg, 'r-',
+                axes[0, 1].plot(steps_subset[window-1:], moving_avg, 'r-',
                                 linewidth=2, label=f'Moving Avg (window={window})')
                 axes[0, 1].legend()
 
         # Weight曲线
         if self.weights:
-            axes[1, 0].plot(self.steps, self.weights,
+            # 只使用与weights长度匹配的steps部分
+            steps_subset = self.steps[-len(self.weights):]
+            axes[1, 0].plot(steps_subset, self.weights,
                             'm-', linewidth=1.5, alpha=0.7)
             axes[1, 0].set_xlabel('Step')
             axes[1, 0].set_ylabel('Weight')
@@ -540,7 +550,9 @@ class TrainingMonitor:
 
         # 准确率曲线
         if self.accuracies:
-            axes[1, 1].plot(self.steps, self.accuracies,
+            # 只使用与accuracies长度匹配的steps部分
+            steps_subset = self.steps[-len(self.accuracies):]
+            axes[1, 1].plot(steps_subset, self.accuracies,
                             'c-', linewidth=1.5, alpha=0.7)
             axes[1, 1].set_xlabel('Step')
             axes[1, 1].set_ylabel('Accuracy')
@@ -676,20 +688,18 @@ class WeightedSFTCallback(TrainerCallback):
         learning_rate = logs.get("learning_rate")
 
         # 计算平均权重和奖励（需要访问当前batch的数据）
-        # 这里简化处理，使用固定的监控间隔
-        if self.step_count % self.args.log_steps == 0:
-            # 从训练数据中采样一些来计算平均值
-            sample_indices = np.random.choice(len(self.training_samples), min(100, len(self.training_samples)), replace=False)
-            avg_weight = np.mean([self.training_samples[i]['weight'] for i in sample_indices])
-            avg_reward = np.mean([self.training_samples[i]['original_reward'] for i in sample_indices])
+        # 从训练数据中采样一些来计算平均值
+        sample_indices = np.random.choice(len(self.training_samples), min(100, len(self.training_samples)), replace=False)
+        avg_weight = np.mean([self.training_samples[i]['weight'] for i in sample_indices])
+        avg_reward = np.mean([self.training_samples[i]['original_reward'] for i in sample_indices])
 
-            self.monitor.log_step(
-                step=self.step_count,
-                loss=loss,
-                reward=avg_reward,
-                weight=avg_weight,
-                learning_rate=learning_rate,
-            )
+        self.monitor.log_step(
+            step=self.step_count,
+            loss=loss,
+            reward=avg_reward,
+            weight=avg_weight,
+            learning_rate=learning_rate,
+        )
 
 def load_config(config_path: str = "config/running_config.yaml") -> dict:
     """加载配置文件"""
@@ -746,7 +756,7 @@ def main():
         gradient_accumulation_steps=optimize_config.get(
             'gradient_accumulation_steps', 8),
         save_steps=optimize_config.get('save_steps', 200),
-        logging_steps=optimize_config.get('log_steps', 10),
+        log_steps=optimize_config.get('log_steps', 10),
         max_train_samples=optimize_config.get('max_train_samples', 1000),
 
         reward_clip_min=optimize_config.get('reward_clip_min', 0.1),
@@ -870,7 +880,7 @@ def main():
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         learning_rate=args.learning_rate,
         warmup_steps=warmup_steps,
-        logging_steps=args.logging_steps,
+        logging_steps=args.log_steps,
         save_steps=args.save_steps,
         save_total_limit=3,
         eval_strategy="no",

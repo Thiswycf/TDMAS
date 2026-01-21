@@ -1,6 +1,7 @@
 import sys
 import time
 import asyncio
+from termcolor import cprint
 from typing import Any, Awaitable, List
 
 
@@ -17,7 +18,7 @@ def _format_seconds(secs: float) -> str:
 async def run_tasks_with_progress(
     tasks: List[Awaitable[Any]],
     desc: str = "Progress",
-    max_number_of_print: int = 1000
+    max_number_of_print: int = 100
 ) -> List[Any]:
     """以 tqdm 风格在终端打印进度，并返回所有任务结果。
 
@@ -71,7 +72,7 @@ async def run_tasks_with_progress(
         filled_len = int(bar_len * completed // total)
         # 使用填充矩形块表示进度条
         filled_block = "█" * filled_len
-        empty_block = "-" * (bar_len - filled_len)
+        empty_block = " " * (bar_len - filled_len)
         bar = filled_block + empty_block
 
         extra = ""
@@ -88,10 +89,11 @@ async def run_tasks_with_progress(
             # 尽量模仿 tqdm 的风格：[elapsed<remaining, it/s, ETA datetime]
             extra = f" [{elapsed_str}<{remaining_str}, {rate:.2f} it/s, ETA {finish_time_str}]"
 
-        sys.stdout.write(
-            f"\r[{desc}] |{bar}| {percent:.1f}% ({completed}/{total}){extra}"
+        cprint(
+            f"\r[{desc}] |{bar}| {percent:.1f}% ({completed}/{total}){extra}",
+            end="",
+            color="green",
         )
-        sys.stdout.flush()
 
     async def wrap_task(i: int, coro: Awaitable[Any]) -> Any:
         nonlocal completed
@@ -101,14 +103,14 @@ async def run_tasks_with_progress(
             result = e
         results[i] = result
         completed += 1
+        print_progress()
         if completed % (max(1, total // max_number_of_print)) == 0:
-            print_progress()
+            cprint("")
         return result
 
     wrapped_tasks = [wrap_task(i, task) for i, task in enumerate(tasks)]
     print_progress()
-    sys.stdout.write("\n")
-    sys.stdout.flush()
+    cprint("")
     await asyncio.gather(*wrapped_tasks)
 
     return results

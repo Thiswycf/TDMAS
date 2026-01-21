@@ -3,7 +3,7 @@
 # general
 dataset: AIME24 # datasets: GSM8K, AIME24, GPQA
 task_type: full_pipeline # full_pipeline, infer_only, train_only
-start_epoch: 2 # start epoch
+start_epoch: 4 # start epoch
 end_epoch: 5 # end epoch
 train_ask_num: 8 # Number of repeated asks to train
 test_ask_num: 5 # Number of repeated asks for stable test
