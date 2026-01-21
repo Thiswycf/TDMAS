@@ -31,6 +31,7 @@ async def run_tasks_with_progress(
         如果某个任务抛异常，则对应位置会是该异常对象。
     """
     import shutil
+    import signal
 
     total = len(tasks)
     if total == 0:
@@ -40,15 +41,24 @@ async def run_tasks_with_progress(
     completed = 0
     start_time = time.time()
 
-    # 自适应 bar_len
-    term_size = shutil.get_terminal_size(fallback=(80, 20))
-    cols = term_size.columns
-    # desc部分: [desc] + "|", 进度数字、百分数等，以及附加说明的长度估算
-    # |========| 100.0% (10/100) [00:10<00:20, 1.00 it/s, ETA ...]
-    # desc部分：len(desc) + 3(左右括号、空格)，进度条符号部分2个("|"和"|")，数字部分(>=20)，附加部分(>=25)
-    # 这里给附加及右边预留80列，根据终端宽度动态确定bar_len
-    usable_len = cols - (len(desc) + 3 + 2 + 80)
-    bar_len = max(10, usable_len)
+    # bar_len 由 get_bar_len 获取，并在 SIGWINCH 时自动更新
+    def get_bar_len() -> int:
+        term_size = shutil.get_terminal_size(fallback=(80, 20))
+        cols = term_size.columns
+        usable_len = cols - (len(desc) + 3 + 2 + 80)
+        return max(10, usable_len)
+
+    bar_len = get_bar_len()
+
+    # 信号处理器，用于检测终端宽度变化
+    def handle_winch(signum, frame):
+        nonlocal bar_len
+        bar_len = get_bar_len()
+    try:
+        signal.signal(signal.SIGWINCH, handle_winch)
+    except Exception:
+        # 不支持 SIGWINCH 的平台（如 Windows）忽略
+        pass
 
     def print_progress() -> None:
         nonlocal completed
@@ -59,7 +69,10 @@ async def run_tasks_with_progress(
         elapsed = now - start_time
         percent = (completed / total) * 100
         filled_len = int(bar_len * completed // total)
-        bar = "=" * filled_len + "-" * (bar_len - filled_len)
+        # 使用填充矩形块表示进度条
+        filled_block = "█" * filled_len
+        empty_block = "-" * (bar_len - filled_len)
+        bar = filled_block + empty_block
 
         extra = ""
         if completed > 0 and elapsed > 0:

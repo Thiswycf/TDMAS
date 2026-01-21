@@ -208,6 +208,6 @@ async def extract_and_execute_code(text: str, timeout: int = 10, max_concurrent_
         return result, None, True
     else:
         # Execution failed, return None to indicate failure (but flag as code)
-        logger.warning(
-            f"Code execution failed: {error[:200] if error else 'Unknown error'}")
+        # logger.warning( # NOTE: modified for clear terminal
+        #     f"Code execution failed: {error[:200] if error else 'Unknown error'}")
         return result, error, True

@@ -3,11 +3,17 @@
 实现完整的训练pipeline：数据收集、优化、验证
 """
 import os
+os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+os.environ["disable_custom_all_reduce"] = "True"
+os.environ["NCCL_IB_DISABLE"] = "True"
+os.environ["NCCL_P2P_DISABLE"] = "True"
+os.environ["NCCL_SOCKET_IFNAME"] = "lo"
+
 import sys
 import yaml
 import json
-import shutil
 import pickle
+import shutil
 import asyncio
 import datetime
 import argparse
@@ -26,8 +32,8 @@ from utils.path_utils import (
     build_model_name,
     evaluation_output_dir,
     solve_rate_file,
-    ppo_data_dir,
-    ppo_data_file,
+    wsft_data_dir,
+    wsft_data_file,
 )
 from utils.llm_manager import get_global_llm_manager
 from metagpt.logs import logger
@@ -216,9 +222,34 @@ async def evaluate_model(
     zcp: str = "accuracy"
 ):
     """评估模型性能"""
+    limit = config.get('limit')
+    
+    # 检查是否已经评估过
+    result_file = solve_rate_file(dataset, zcp, "inference")
+    if os.path.exists(result_file):
+        try:
+            with open(result_file, "r") as f:
+                lines = f.readlines()
+                if lines:
+                    last_line = lines[-1].strip()
+                    # 检查最后一行是否包含当前的limit和epoch
+                    if f"Limit {limit} | Epoch {epoch}" in last_line:
+                        cprint(f"[TDMAS] 模型已评估 | Epoch {epoch} | Limit {limit} | 跳过评估", color="green")
+                        logger.info(f"模型已评估，跳过评估：Limit {limit}, Epoch {epoch}")
+                        # 从最后一行提取准确率
+                        import re
+                        match = re.search(r'Test Solve Rate: ([\d.]+)%', last_line)
+                        if match:
+                            test_accuracy = float(match.group(1))
+                            cprint(f"[TDMAS] 使用已有评估结果 | Accuracy: {test_accuracy:.4f}%", color="green")
+                            return test_accuracy, []
+                        else:
+                            return 0.0, []
+        except Exception as e:
+            logger.warning(f"检查评估记录时出错: {e}")
+
     cprint(f"[TDMAS] 开始评估模型 | Epoch {epoch} | Dataset {dataset}", color="blue")
 
-    limit = config.get('limit')
     max_depth = config.get('max_depth', 5)
     max_loop = config.get('max_loop', 5)
     max_debug_attempts = config.get('max_debug_attempts', 2)
@@ -299,46 +330,55 @@ async def run_training_epoch(
 
     cprint(f"[TDMAS] {'='*10} Epoch {epoch} {'='*10}", color="blue")
 
-    # 1. 收集训练数据
-    # collected_data = await collect_training_data(
-    #     model_name,
-    #     dataset,
-    #     benchmark,
-    #     training_data,
-    #     epoch,
-    #     limit=limit,
-    #     max_depth=max_depth,
-    #     max_concurrent_request=max_concurrent_request,
-    #     max_concurrent_execute_code=max_concurrent_execute_code,
-    #     train_ask_num=train_ask_num,
-    #     max_loop=max_loop,
-    #     max_debug_attempts=max_debug_attempts,
-    #     zcp=zcp
-    # )
-    # get_global_llm_manager().clear_all()
-    # cprint("All LLM models have been cleared!", color="green")
-    # logger.info("All LLM models have been cleared!")
 
-    # # # 2. 生成preference data
-    # # similarity_threshold = config.get('similarity_threshold')
-    # # preference_pairs_limit = config.get('preference_pairs_limit')
-    # # generate_preference_data_from_collected(
-    # #     collected_data,
-    # #     dataset,
-    # #     zcp,
-    # #     epoch,
-    # #     similarity_threshold=similarity_threshold,
-    # #     preference_pairs_limit=preference_pairs_limit
-    # # )
+    ensure_dir(wsft_data_dir(dataset, zcp))
+    wsft_data_path = wsft_data_file(dataset, zcp, epoch)
 
-    # # 2. 生成PPO training data
-    # ensure_dir(ppo_data_dir(dataset, zcp))
-    # with open(ppo_data_file(dataset, zcp, epoch), 'wb') as f:
-    #     pickle.dump(collected_data, f)
+    if not os.path.exists(wsft_data_path):
+        # 1. 收集训练数据
+        collected_data = await collect_training_data(
+            model_name,
+            dataset,
+            benchmark,
+            training_data,
+            epoch,
+            limit=limit,
+            max_depth=max_depth,
+            max_concurrent_request=max_concurrent_request,
+            max_concurrent_execute_code=max_concurrent_execute_code,
+            train_ask_num=train_ask_num,
+            max_loop=max_loop,
+            max_debug_attempts=max_debug_attempts,
+            zcp=zcp
+        )
+        get_global_llm_manager().clear_all()
+        cprint("All LLM models have been cleared!", color="green")
+        logger.info("All LLM models have been cleared!")
 
-    # cprint(
-    #     f"[TDMAS] weighted-SFT data 生成完成 | Epoch {epoch} | 生成了 {len(collected_data)} 条数据，保存到 {ppo_data_file(dataset, zcp, epoch)}", color="green")
-    # logger.info(f"weighted-SFT data 生成完成，共 {len(collected_data)} 条数据，保存到 {ppo_data_file(dataset, zcp, epoch)}")
+        # # 2. 生成preference data
+        # similarity_threshold = config.get('similarity_threshold')
+        # preference_pairs_limit = config.get('preference_pairs_limit')
+        # generate_preference_data_from_collected(
+        #     collected_data,
+        #     dataset,
+        #     zcp,
+        #     epoch,
+        #     similarity_threshold=similarity_threshold,
+        #     preference_pairs_limit=preference_pairs_limit
+        # )
+
+        # 2. 生成wsft training data
+        with open(wsft_data_path, 'wb') as f:
+            pickle.dump(collected_data, f)
+
+        cprint(
+            f"[TDMAS] weighted-SFT data 生成完成 | Epoch {epoch} | 生成了 {len(collected_data)} 条数据，保存到 {wsft_data_path}", color="green")
+        logger.info(f"weighted-SFT data 生成完成，共 {len(collected_data)} 条数据，保存到 {wsft_data_path}")
+    else:
+        cprint(
+            f"[TDMAS] weighted-SFT data 已存在 | Epoch {epoch} | 从 {wsft_data_path} 加载", color="green")
+        logger.info(f"weighted-SFT data 已存在，从 {wsft_data_path} 加载")
+
 
     # 3. 优化模型
     await optimize_model(epoch, dataset, zcp, train_only=train_only)

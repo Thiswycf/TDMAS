@@ -4,6 +4,7 @@
 import os
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 
+import re
 import sys
 import pickle
 import json
@@ -12,8 +13,10 @@ import time
 import yaml
 import torch
 import warnings
+import glob
+import shutil
 from torch import nn
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset
 import numpy as np
 import matplotlib
 matplotlib.use('Agg')  # 使用非交互式后端
@@ -30,8 +33,10 @@ warnings.filterwarnings("ignore", message=".*max_length.*is ignored.*")
 warnings.filterwarnings("ignore", message=".*use_cache.*is incompatible.*")
 warnings.filterwarnings("ignore", message=".*torch.utils.checkpoint.*use_reentrant.*")
 warnings.filterwarnings("ignore", message=".*The tokenizer has new PAD/BOS/EOS tokens.*")
+warnings.filterwarnings("ignore", message=".*Setting `save_embedding_layers` to `True`.*")
 warnings.filterwarnings("ignore", category=FutureWarning, module="transformers")
 warnings.filterwarnings("ignore", category=UserWarning, module="transformers")
+warnings.filterwarnings("ignore", category=UserWarning, module="peft")
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -41,8 +46,8 @@ from transformers import (
     BitsAndBytesConfig,
     Trainer,
     TrainingArguments,
+    TrainerCallback
 )
-
 from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 from metagpt.logs import logger
 from utils.llm_manager import LLMManager
@@ -77,7 +82,7 @@ class Args:
     gradient_accumulation_steps: int = field(default=8)
     save_steps: int = field(default=200)
     logging_steps: int = field(default=10)
-    warmup_steps: int = field(default=100)
+    max_train_samples: int = field(default=4096)
 
     # Reward processing
     reward_clip_min: float = field(default=0.1)  # 避免权重为0
@@ -103,8 +108,18 @@ class Args:
     save_steps: int = field(default=200)
     log_steps: int = field(default=10)
 
-    # Visualization
-    plot_steps: int = field(default=50)  # 每多少步绘制一次loss曲线
+
+def find_latest_checkpoint(output_dir):
+    """查找最近的checkpoint目录"""
+    checkpoint_pattern = os.path.join(output_dir, "checkpoint-*")
+    checkpoint_dirs = glob.glob(checkpoint_pattern)
+    
+    if not checkpoint_dirs:
+        return None
+    
+    # 按数字序号排序（例如 checkpoint-100 > checkpoint-50）
+    checkpoint_dirs.sort(key=lambda x: int(x.split("-")[-1]), reverse=True)
+    return checkpoint_dirs[0]
 
 
 def set_seed(seed: int):
@@ -148,7 +163,7 @@ def process_rewards(rewards: List[float], clip_min: float = 0.1, clip_max: float
 # -------------------------
 # Data Loading
 # -------------------------
-def load_training_data(dataset: str, zcp: str, epoch: int) -> List[Dict]:
+def load_training_data(dataset: str, zcp: str, epoch: int, max_train_samples: int = 1000) -> List[Dict]:
     """从pickle文件加载训练数据"""
     data_file = wsft_data_file(dataset, zcp, epoch)
     if not os.path.exists(data_file):
@@ -156,14 +171,15 @@ def load_training_data(dataset: str, zcp: str, epoch: int) -> List[Dict]:
 
     logger.info(f"正在加载训练数据: {data_file}")
     with open(data_file, 'rb') as f:
-        collected_data = pickle.load(f)
+        training_data = pickle.load(f)
 
-    # 提取training_data
-    training_data = []
-    for data in collected_data:
-        training_data.extend(data["single_problem_train_data"])
+    logger.info(f"加载 {len(training_data)} 条原始训练样本")
 
-    logger.info(f"成功加载 {len(training_data)} 条训练样本")
+    # 随机采样
+    random.shuffle(training_data)
+    training_data = training_data[:max_train_samples]
+
+    logger.info(f"加载 {len(training_data)} 条随机采样训练样本")
 
     # 提取并处理reward
     raw_rewards = []
@@ -313,7 +329,8 @@ class WeightedCrossEntropyLoss(nn.Module):
         if total_valid_tokens > 0:
             return weighted_loss.sum() / total_valid_tokens
         else:
-            return torch.tensor(0.0, device=logits.device)
+            # 返回一个与logits相关的零张量，保持梯度连接
+            return logits.sum() * 0.0
 
 
 # -------------------------
@@ -346,9 +363,8 @@ class WeightedSFTTrainer(Trainer):
 class TrainingMonitor:
     """训练监控器，用于记录和可视化训练过程"""
 
-    def __init__(self, output_dir: str, plot_steps: int = 50):
+    def __init__(self, output_dir: str):
         self.output_dir = output_dir
-        self.plot_steps = plot_steps
         ensure_dir(output_dir)
 
         # 记录训练指标
@@ -390,15 +406,15 @@ class TrainingMonitor:
 
         self.steps.append(step)
         if loss is not None:
-            self.losses.append(loss)
+            self.losses.append(float(loss))
         if reward is not None:
-            self.rewards.append(reward)
+            self.rewards.append(float(reward))
         if weight is not None:
-            self.weights.append(weight)
+            self.weights.append(float(weight))
         if learning_rate is not None:
-            self.learning_rates.append(learning_rate)
+            self.learning_rates.append(float(learning_rate))
         if accuracy is not None:
-            self.accuracies.append(accuracy)
+            self.accuracies.append(float(accuracy))
 
         # 保存到JSONL文件
         metrics = {
@@ -438,9 +454,8 @@ class TrainingMonitor:
         with open(self.metrics_file, 'a', encoding='utf-8') as f:
             f.write(json.dumps(metrics, ensure_ascii=False) + '\n')
 
-        # 定期绘制loss曲线
-        if step % self.plot_steps == 0:
-            self.plot_metrics()
+        # 绘制loss曲线
+        self.plot_metrics()
 
     def estimate_remaining_time(self, current_step: int, total_steps: int) -> str:
         """估算剩余训练时间"""
@@ -587,32 +602,47 @@ class WeightedDataCollator:
 
         # 处理input_ids, attention_mask, labels
         if 'input_ids' in features[0]:
-            # 填充到相同长度
-            input_ids = [f['input_ids'] for f in features]
-            attention_mask = [f['attention_mask'] for f in features]
-            labels = [f['labels'] for f in features] if 'labels' in features[0] else None
-
-            # 使用tokenizer的pad方法，强制截断到max_length
+            # 先手动截断所有序列到max_length，确保长度一致
+            input_ids = []
+            attention_mask = []
+            labels = []
+            
+            for f in features:
+                # 截断input_ids和attention_mask
+                ids = f['input_ids'][:self.max_length]
+                mask = f['attention_mask'][:self.max_length]
+                lbls = f['labels'][:self.max_length] if 'labels' in f else None
+                
+                input_ids.append(ids)
+                attention_mask.append(mask)
+                if lbls is not None:
+                    labels.append(lbls)
+            
+            # 使用tokenizer.pad进行padding
             padded = self.tokenizer.pad(
-                {'input_ids': input_ids, 'attention_mask': attention_mask},
+                [{'input_ids': ids, 'attention_mask': mask} for ids, mask in zip(input_ids, attention_mask)],
                 padding='max_length',
                 max_length=self.max_length,
-                # truncation=True,
                 return_tensors='pt'
             )
 
             batch['input_ids'] = padded['input_ids']
             batch['attention_mask'] = padded['attention_mask']
 
-            if labels is not None:
-                # 填充labels到相同长度
-                padded_labels = self.tokenizer.pad(
-                    {'input_ids': labels},
-                    padding='max_length',
-                    max_length=self.max_length,
-                    return_tensors='pt'
-                )['input_ids']
-                batch['labels'] = padded_labels
+            if labels:
+                # 手动填充labels到max_length，使用-100作为padding值
+                padded_labels = []
+                pad_token_id = self.tokenizer.pad_token_id if self.tokenizer.pad_token_id is not None else -100
+                
+                for lbl in labels:
+                    if len(lbl) < self.max_length:
+                        # 填充到max_length，使用-100（忽略的token）
+                        padded_lbl = lbl + [-100] * (self.max_length - len(lbl))
+                    else:
+                        padded_lbl = lbl[:self.max_length]
+                    padded_labels.append(padded_lbl)
+                
+                batch['labels'] = torch.tensor(padded_labels, dtype=torch.long)
 
         # 添加权重到batch
         batch['weights'] = torch.tensor(weights, dtype=torch.float32)
@@ -620,6 +650,46 @@ class WeightedDataCollator:
 
         return batch
 
+
+# -------------------------
+# Training Callbacks
+# -------------------------
+class WeightedSFTCallback(TrainerCallback):
+    def __init__(self, monitor, args, training_samples):
+        self.monitor: MetricMonitor = monitor
+        self.args = args
+        self.training_samples = training_samples
+        self.step_count = 0
+
+    def on_train_begin(self, args, state, control, **kwargs):
+        pass
+
+    def on_epoch_begin(self, args, state, control, **kwargs):
+        pass
+
+    def on_log(self, args, state, control, logs=None, **kwargs):
+        if logs is None:
+            return
+
+        self.step_count += 1
+        loss = logs.get("loss")
+        learning_rate = logs.get("learning_rate")
+
+        # 计算平均权重和奖励（需要访问当前batch的数据）
+        # 这里简化处理，使用固定的监控间隔
+        if self.step_count % self.args.log_steps == 0:
+            # 从训练数据中采样一些来计算平均值
+            sample_indices = np.random.choice(len(self.training_samples), min(100, len(self.training_samples)), replace=False)
+            avg_weight = np.mean([self.training_samples[i]['weight'] for i in sample_indices])
+            avg_reward = np.mean([self.training_samples[i]['original_reward'] for i in sample_indices])
+
+            self.monitor.log_step(
+                step=self.step_count,
+                loss=loss,
+                reward=avg_reward,
+                weight=avg_weight,
+                learning_rate=learning_rate,
+            )
 
 def load_config(config_path: str = "config/running_config.yaml") -> dict:
     """加载配置文件"""
@@ -668,6 +738,7 @@ def main():
         max_new_tokens=optimize_config.get('max_new_tokens', 1024),
         temperature=optimize_config.get('temperature', 0.7),
         top_p=optimize_config.get('top_p', 0.9),
+
         learning_rate=float(optimize_config.get('learning_rate', 1e-6)),
         num_train_epochs=optimize_config.get('num_train_epochs', 1),
         per_device_train_batch_size=optimize_config.get(
@@ -676,7 +747,8 @@ def main():
             'gradient_accumulation_steps', 8),
         save_steps=optimize_config.get('save_steps', 200),
         logging_steps=optimize_config.get('log_steps', 10),
-        warmup_steps=optimize_config.get('warmup_steps', 100),
+        max_train_samples=optimize_config.get('max_train_samples', 1000),
+
         reward_clip_min=optimize_config.get('reward_clip_min', 0.1),
         reward_clip_max=optimize_config.get('reward_clip_max', 10.0),
         kl_coef=optimize_config.get('kl_coef', 0.02),
@@ -690,10 +762,9 @@ def main():
             'bnb_4bit_compute_dtype', 'bfloat16'),
         enable_thinking=get_bool(
             optimize_config.get('enable_thinking', False)),
-        plot_steps=optimize_config.get('plot_steps', 50),
     )
 
-    os.environ["CUDA_VISIBLE_DEVICES"] = LLMManager._allocate_gpus(llm_memory=20.0)["cuda_visible_devices"]
+    os.environ["CUDA_VISIBLE_DEVICES"] = LLMManager._allocate_gpus(llm_memory=48.0)["cuda_visible_devices"]
 
     # 加载 local_llm 配置文件
     local_llm_config_path = "config/local_llm.yaml"
@@ -710,7 +781,7 @@ def main():
     logger.info(f"已从配置文件加载参数: {config_path}")
 
     # 设置输出目录
-    output_dir = finetuned_epoch_dir(args.dataset, args.zcp, args.epoch)
+    output_dir = finetuned_epoch_dir(args.dataset, args.zcp, args.epoch + 1)
     ensure_dir(output_dir)
 
     set_seed(args.seed)
@@ -725,7 +796,7 @@ def main():
     # -------------------------
     # 加载训练数据
     # -------------------------
-    training_samples = load_training_data(args.dataset, args.zcp, args.epoch)
+    training_samples = load_training_data(args.dataset, args.zcp, args.epoch, args.max_train_samples)
     if len(training_samples) == 0:
         raise ValueError("训练数据为空")
 
@@ -785,6 +856,7 @@ def main():
     # Dataset
     # -------------------------
     dataset = WeightedSFTDataset(training_samples, tokenizer, max_length=args.max_prompt_len)
+    warmup_steps = int(len(training_samples) // args.gradient_accumulation_steps * 0.1)
 
     data_collator = WeightedDataCollator(tokenizer, max_length=args.max_prompt_len)
 
@@ -797,7 +869,7 @@ def main():
         per_device_train_batch_size=args.per_device_train_batch_size,
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         learning_rate=args.learning_rate,
-        warmup_steps=args.warmup_steps,
+        warmup_steps=warmup_steps,
         logging_steps=args.logging_steps,
         save_steps=args.save_steps,
         save_total_limit=3,
@@ -822,52 +894,58 @@ def main():
     )
 
     # -------------------------
+    # Check Final Model
+    # -------------------------
+    final_dir = finetuned_model_path(args.dataset, args.zcp, args.epoch + 1)
+    final_model_exists = os.path.exists(final_dir)
+    
+    if final_model_exists:
+        logger.info(f"检测到已存在final模型: {final_dir}")
+        
+        # 检查是否为合并后的完整模型
+        # 完整模型会包含pytorch_model.bin或model.safetensors等文件
+        # 检测是否存在合并后的完整模型文件
+        # 1) 单文件权重
+        single_files = ['pytorch_model.bin', 'model.safetensors', 'consolidated.00.pth']
+        has_single = any(os.path.exists(os.path.join(final_dir, f)) for f in single_files)
+
+        # 2) 多文件权重（至少包含一个 model-00001-of-*.safetensors 或 .bin）
+        shard_files = os.listdir(final_dir)
+        has_shards = any(
+            re.fullmatch(r'model-\d{5}-of-\d{5}\.(safetensors|bin)', f)
+            for f in shard_files
+        )
+
+        is_merged = has_single or has_shards
+        if is_merged:
+            logger.info("已存在合并后的完整模型，跳过本次训练")
+            logger.info("=" * 60)
+            logger.info("训练已跳过!")
+            logger.info("使用已存在的合并后模型")
+            logger.info("=" * 60)
+            return
+        else:
+            logger.info("检测到未合并的模型，开始合并权重...")
+            # 如果使用了LoRA，合并权重
+            if args.use_lora and hasattr(trainer.model, 'merge_and_unload'):
+                try:
+                    trainer.model = trainer.model.merge_and_unload()
+                    trainer.save_model(final_dir)
+                    tokenizer.save_pretrained(final_dir)
+                    logger.info("权重合并完成并已保存")
+                    logger.info("=" * 60)
+                    logger.info("权重合并已完成!")
+                    logger.info("=" * 60)
+                    return
+                except Exception as e:
+                    logger.warning(f"合并权重失败: {str(e)}")
+                    logger.info("将继续进行完整训练")
+    
+    # -------------------------
     # Training Monitor
     # -------------------------
-    monitor = TrainingMonitor(output_dir, plot_steps=args.plot_steps)
+    monitor = TrainingMonitor(output_dir)
     monitor.start_training()
-
-    # -------------------------
-    # Training Callbacks
-    # -------------------------
-    from transformers import TrainerCallback
-
-    class WeightedSFTCallback(TrainerCallback):
-        def __init__(self, monitor, args, training_samples):
-            self.monitor = monitor
-            self.args = args
-            self.training_samples = training_samples
-            self.step_count = 0
-
-        def on_train_begin(self, args, state, control, **kwargs):
-            pass
-
-        def on_epoch_begin(self, args, state, control, **kwargs):
-            pass
-
-        def on_log(self, args, state, control, logs=None, **kwargs):
-            if logs is None:
-                return
-
-            self.step_count += 1
-            loss = logs.get("loss")
-            learning_rate = logs.get("learning_rate")
-
-            # 计算平均权重和奖励（需要访问当前batch的数据）
-            # 这里简化处理，使用固定的监控间隔
-            if self.step_count % self.args.log_steps == 0:
-                # 从训练数据中采样一些来计算平均值
-                sample_indices = np.random.choice(len(self.training_samples), min(100, len(self.training_samples)), replace=False)
-                avg_weight = np.mean([self.training_samples[i]['weight'] for i in sample_indices])
-                avg_reward = np.mean([self.training_samples[i]['original_reward'] for i in sample_indices])
-
-                self.monitor.log_step(
-                    step=self.step_count,
-                    loss=loss,
-                    reward=avg_reward,
-                    weight=avg_weight,
-                    learning_rate=learning_rate,
-                )
 
     callback = WeightedSFTCallback(monitor, args, training_samples)
     trainer.add_callback(callback)
@@ -876,14 +954,54 @@ def main():
     # Training
     # -------------------------
     logger.info("开始训练...")
-    trainer.train()
+    
+    # 检查是否有最近的checkpoint
+    latest_checkpoint = find_latest_checkpoint(output_dir)
+    if latest_checkpoint:
+        logger.info(f"找到最近的checkpoint: {latest_checkpoint}")
+        logger.info("从checkpoint继续训练...")
+        trainer.train(resume_from_checkpoint=latest_checkpoint)
+    else:
+        logger.info("没有找到checkpoint，从头开始训练...")
+        trainer.train()
 
     # -------------------------
     # Save Final Model
     # -------------------------
-    final_dir = finetuned_model_path(args.dataset, args.zcp, args.epoch)
-    trainer.save_pretrained(final_dir)
+    final_dir = finetuned_model_path(args.dataset, args.zcp, args.epoch + 1)
+    
+    # 如果使用了LoRA，先合并权重到基础模型
+    if args.use_lora and hasattr(trainer.model, 'merge_and_unload'):
+        logger.info("正在合并LoRA权重到基础模型...")
+        try:
+            trainer.model = trainer.model.merge_and_unload()
+            logger.info("LoRA权重合并完成")
+        except Exception as e:
+            logger.warning(f"合并LoRA权重失败: {str(e)}")
+            logger.warning("将保存未合并的LoRA模型")
+    
+    trainer.save_model(final_dir)
     logger.info(f"最终模型已保存: {final_dir}")
+    
+    # 保存tokenizer
+    tokenizer.save_pretrained(final_dir)
+    logger.info(f"Tokenizer已保存: {final_dir}")
+    
+    # -------------------------
+    # Delete All Checkpoints
+    # -------------------------
+    logger.info("开始清理checkpoint...")
+    checkpoint_pattern = os.path.join(output_dir, "checkpoint-*")
+    checkpoint_dirs = glob.glob(checkpoint_pattern)
+    
+    for checkpoint_dir in checkpoint_dirs:
+        try:
+            shutil.rmtree(checkpoint_dir)
+            logger.info(f"已删除checkpoint: {checkpoint_dir}")
+        except Exception as e:
+            logger.warning(f"删除checkpoint失败: {checkpoint_dir}, 错误: {str(e)}")
+    
+    logger.info("checkpoint清理完成")
 
     # 保存训练总结
     summary = monitor.save_summary(int(trainer.state.global_step))

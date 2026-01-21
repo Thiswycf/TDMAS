@@ -1,13 +1,10 @@
 # running configuration
 
 # general
-dataset: GSM8K # datasets: GSM8K, AIME24, GPQA
-# task_type: full_pipeline # full_pipeline, infer_only, train_only
-# start_epoch: 0 # start epoch
-# end_epoch: 5 # end epoch
-task_type: train_only # full_pipeline, infer_only, train_only
-start_epoch: 0 # start epoch
-end_epoch: 1 # end epoch
+dataset: AIME24 # datasets: GSM8K, AIME24, GPQA
+task_type: full_pipeline # full_pipeline, infer_only, train_only
+start_epoch: 2 # start epoch
+end_epoch: 5 # end epoch
 train_ask_num: 8 # Number of repeated asks to train
 test_ask_num: 5 # Number of repeated asks for stable test
 max_depth: 5 # max depth of the problem
@@ -30,8 +27,8 @@ preference_pairs_limit: 128 # preference pairs per epoch
 
 # test
 # limit: 2 # limit samples to rapid test (problems number)
-limit: 128 # limit samples to rapid test (problems number)
-# limit: 10000 # No limit
+# limit: 128 # limit samples to rapid test (problems number)
+limit: 10000 # No limit
 
 # system
 max_concurrent_request: 512 # max concurrent requests to the LLM
@@ -49,7 +46,7 @@ optimize_config:
   total_episodes: 50 # Total training episodes/steps
   per_device_train_batch_size: 1 # Batch size per device
   gradient_accumulation_steps: 8 # Gradient accumulation steps
-  num_ppo_epochs: 1 # Number of weighted-SFT epochs
+  num_wsft_epochs: 1 # Number of weighted-SFT epochs
   num_mini_batches: 1 # Number of mini batches
   kl_coef: 0.02 # KL divergence coefficient
   missing_eos_penalty: 1.0 # Missing EOS penalty
@@ -57,9 +54,9 @@ optimize_config:
   lora_r: 16 # LoRA rank
   lora_alpha: 32 # LoRA alpha
   lora_dropout: 0.05 # LoRA dropout
-  load_in_4bit: true # Load model in 4-bit quantization
+  load_in_4bit: false # Load model in 4-bit quantization
   bnb_4bit_compute_dtype: bfloat16 # 4-bit compute dtype: bfloat16 or float16
   enable_thinking: false # Enable thinking mode (for Qwen3)
-  save_steps: 128 # Save checkpoint every N steps
-  log_steps: 4 # Log metrics every N steps
-  plot_steps: 4 # Plot metrics every N steps
+  save_steps: 32 # Save checkpoint every N steps
+  log_steps: 8 # Log metrics every N steps
+  max_train_samples: 4096 # Max training samples of one epoch

@@ -109,7 +109,8 @@ class Agent:
 
     def record_output_id_score(self, output_id: str, score: float, type: str):
         """记录输出id的打分"""
-        self.mas.record_output_id_score(output_id, score, type)
+        if score is not None:
+            self.mas.record_output_id_score(output_id, score, type)
 
     async def solve(
         self,
@@ -131,7 +132,7 @@ class Agent:
             assert self.input_conversation and feedback is not None, "For non-first turns to superior, input_conversation must not be empty and feedback must not be None. " + f"Got input_conversation={self.input_conversation} and feedback={feedback}"
 
         if self.depth >= self.max_depth:
-            logger.warning(f"达到最大递归深度 {self.max_depth}，停止递归（depth={self.depth}）")
+            # logger.warning(f"达到最大递归深度 {self.max_depth}，停止递归（depth={self.depth}）") # NOTE: modified for clear terminal
             # 这是自己对问题的评价（下级对上级的评价，一致性信号）
             self.record_output_id_score(source_id, 0.0, "consistency")
             return {
@@ -178,6 +179,9 @@ class Agent:
                 if turn_to_subordinates > 1:
                     subquestion_scores = parsed_response.get('subquestion_scores', {})
                     for subq_id, subq_score in subquestion_scores.items():
+                        if subq_id not in self.subq_id_subq_reply_id_dict:
+                            logger.warning(f"子问题 {subq_id} 没有对应的回复 id，跳过打分")
+                            continue
                         subq_source_id = self.subq_id_subq_reply_id_dict[subq_id]
                         # 这是自己对子问题回复的评价（上级对下级的监督信号）
                         self.record_output_id_score(subq_source_id, subq_score, "supervision")
@@ -252,7 +256,7 @@ class Agent:
                 subq_ids = [subq["id"] for subq in subquestions]
                 assert len(subq_ids) == len(set(subq_ids)), f"subquestions contains duplicate ids: {subq_ids}"
 
-                logger.info(f"问题被分解为 {len(subquestions)} 个子问题（depth={self.depth}, loop={turn_to_subordinates}）")
+                # logger.info(f"问题被分解为 {len(subquestions)} 个子问题（depth={self.depth}, loop={turn_to_subordinates}）") # NOTE: modified for clear terminal
 
 
                 # 3.1 将子问题分发给下级（每个子 agent 自行用自己的循环进行多轮）
@@ -431,9 +435,9 @@ class MultiAgentSystem:
     def record_output_id_score(self, output_id: str, score: float, type: str):
         """记录输出id的打分"""
         if type == "supervision":
-            self.output_id_supervision_scores.setdefault(output_id, []).append(score)
+            self.output_id_supervision_scores.setdefault(output_id, []).append(score * 0.01) # 百分制得分
         elif type == "consistency":
-            self.output_id_consistency_scores.setdefault(output_id, []).append(score)
+            self.output_id_consistency_scores.setdefault(output_id, []).append(score * 0.01) # 百分制得分
         else:
             raise ValueError(f"Invalid score type: {type}. Must be 'supervision' or 'consistency'.")
     
