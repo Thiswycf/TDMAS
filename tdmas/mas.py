@@ -287,14 +287,19 @@ class Agent:
                     feedback = (subq_score, subq_evaluation)
                     if subq_score is None or subq_evaluation is None:
                         feedback = None
-                    if subq_score:
-                        assert self.subq_id_subq_reply_id_dict.get(subq["id"]), f"子问题ID为空，子问题ID：{subq['id']}"
-                        subq_source_id = self.subq_id_subq_reply_id_dict[subq["id"]]
-                        # 这是自己对子问题回复的评价（上级对下级的监督信号）
-                        self.record_output_id_score(subq_source_id, subq_score, "supervision")
-                    # Wrap child.solve in a coroutine that tracks subq["id"] to prevent 'was never awaited'
-                    elif child.turn_to_superior > 0:
-                        raise ValueError(f"子问题ID为 {subq['id']} 的子问题被多次追问，但子问题的反馈为空")
+                    try:
+                        if subq_score:
+                            # 上级 agent 极小概率会输出越界的子问题ID
+                            assert self.subq_id_subq_reply_id_dict.get(subq["id"]), f"未存档的子问题ID：{subq['id']}（上级 agent 输出越界的子问题ID）"
+                            subq_source_id = self.subq_id_subq_reply_id_dict[subq["id"]]
+                            # 这是自己对子问题回复的评价（上级对下级的监督信号）
+                            self.record_output_id_score(subq_source_id, subq_score, "supervision")
+                        # Wrap child.solve in a coroutine that tracks subq["id"] to prevent 'was never awaited'
+                        elif child.turn_to_superior > 0:
+                            # 上级 agent 极小概率会忘记评价下级，无法避免
+                            raise ValueError(f"ID为 {subq['id']} 的子问题被追问，但反馈为空（上级 agent 未评价下级）")
+                    except ValueError as e:
+                        logger.error(f"subq_id 到 subq_reply_id 的映射失败：{e}")
                     async def sub_solve(subq_id: int, child_instance: Agent, *args, **kwargs):
                         # Await the solve and bundle id for gathering later
                         r = await child_instance.solve(*args, **kwargs)
@@ -588,8 +593,8 @@ class MultiAgentSystem:
         # 标记奖励得分
         for turn_record in self.conversation_history:
             output_id = turn_record["output_id"]
-            supervision_score = sum(self.output_id_supervision_scores.get(output_id, []))
-            consistency_score = sum(self.output_id_consistency_scores.get(output_id, []))
+            supervision_score = sum(self.output_id_supervision_scores.get(output_id, [])) / len(self.output_id_supervision_scores.get(output_id, []))
+            consistency_score = sum(self.output_id_consistency_scores.get(output_id, [])) / len(self.output_id_consistency_scores.get(output_id, []))
             turn_record["supervision_score"] = supervision_score
             turn_record["consistency_score"] = consistency_score
 

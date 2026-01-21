@@ -18,7 +18,7 @@ def _format_seconds(secs: float) -> str:
 async def run_tasks_with_progress(
     tasks: List[Awaitable[Any]],
     desc: str = "Progress",
-    max_number_of_print: int = 100
+    max_number_of_print: int = 20
 ) -> List[Any]:
     """以 tqdm 风格在终端打印进度，并返回所有任务结果。
 
