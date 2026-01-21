@@ -593,8 +593,13 @@ class MultiAgentSystem:
         # 标记奖励得分
         for turn_record in self.conversation_history:
             output_id = turn_record["output_id"]
-            supervision_score = sum(self.output_id_supervision_scores.get(output_id, [])) / len(self.output_id_supervision_scores.get(output_id, []))
-            consistency_score = sum(self.output_id_consistency_scores.get(output_id, [])) / len(self.output_id_consistency_scores.get(output_id, []))
+            supervision_scores = self.output_id_supervision_scores.get(output_id, [])
+            supervision_score = sum(supervision_scores) / len(supervision_scores) if supervision_scores else 0.0
+            
+            consistency_scores = self.output_id_consistency_scores.get(output_id, [])
+            consistency_score = sum(consistency_scores) / len(consistency_scores) if consistency_scores else 0.0
+
+
             turn_record["supervision_score"] = supervision_score
             turn_record["consistency_score"] = consistency_score
 
