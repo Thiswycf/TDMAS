@@ -448,6 +448,8 @@ class MultiAgentSystem:
         """记录输出id的打分"""
         if not is_label:
             score *= 0.01 # 百分制得分
+        else:
+            score *= 10 # 标签权重更大
         if type == "supervision":
             self.output_id_supervision_scores.setdefault(output_id, []).append(score)
         elif type == "consistency":
