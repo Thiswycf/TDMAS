@@ -34,6 +34,8 @@ from utils.path_utils import (
     solve_rate_file,
     wsft_data_dir,
     wsft_data_file,
+    ppo_data_dir,
+    ppo_data_file,
 )
 from utils.llm_manager import get_global_llm_manager
 from metagpt.logs import logger
@@ -189,12 +191,13 @@ async def optimize_model(
     zcp: str = "accuracy",
     train_only: bool = False
 ):
-    """优化模型（DPO训练）"""
+    """优化模型（PPO训练）"""
     cprint(f"[TDMAS] 开始优化模型 | Epoch {epoch}", color="blue")
 
     # 在独立子进程中运行优化，避免主进程持有CUDA上下文
     trainer_script = os.path.join(
-        os.path.dirname(__file__), "tdmas/wsft_optimize.py")
+        # os.path.dirname(__file__), "tdmas/wsft_optimize.py")
+        os.path.dirname(__file__), "tdmas/ppo_optimize.py")
     cmd = [
         sys.executable,
         trainer_script,
@@ -331,10 +334,13 @@ async def run_training_epoch(
     cprint(f"[TDMAS] {'='*10} Epoch {epoch} {'='*10}", color="blue")
 
 
-    ensure_dir(wsft_data_dir(dataset, zcp))
-    wsft_data_path = wsft_data_file(dataset, zcp, epoch)
+    # ensure_dir(wsft_data_dir(dataset, zcp))
+    # data_path = wsft_data_file(dataset, zcp, epoch)
+    ensure_dir(ppo_data_dir(dataset, zcp))
+    data_dir = ppo_data_file(dataset, zcp, epoch)
 
-    if not os.path.exists(wsft_data_path):
+    # if True:
+    if not os.path.exists(data_dir):
         # 1. 收集训练数据
         collected_data = await collect_training_data(
             model_name,
@@ -367,17 +373,29 @@ async def run_training_epoch(
         #     preference_pairs_limit=preference_pairs_limit
         # )
 
-        # 2. 生成wsft training data
-        with open(wsft_data_path, 'wb') as f:
+    #     # 2. 生成wsft training data
+    #     with open(data_dir, 'wb') as f:
+    #         pickle.dump(collected_data, f)
+
+    #     cprint(
+    #         f"[TDMAS] weighted-SFT data 生成完成 | Epoch {epoch} | 生成了 {len(collected_data)} 条数据，保存到 {data_dir}", color="green")
+    #     logger.info(f"weighted-SFT data 生成完成，共 {len(collected_data)} 条数据，保存到 {data_dir}")
+    # else:
+    #     cprint(
+    #         f"[TDMAS] weighted-SFT data 已存在 | Epoch {epoch} | 从 {data_dir} 加载", color="green")
+    #     logger.info(f"weighted-SFT data 已存在，从 {data_dir} 加载")
+
+        # 2. 生成ppo training data
+        with open(data_dir, 'wb') as f:
             pickle.dump(collected_data, f)
 
         cprint(
-            f"[TDMAS] weighted-SFT data 生成完成 | Epoch {epoch} | 生成了 {len(collected_data)} 条数据，保存到 {wsft_data_path}", color="green")
-        logger.info(f"weighted-SFT data 生成完成，共 {len(collected_data)} 条数据，保存到 {wsft_data_path}")
+            f"[TDMAS] PPO data 生成完成 | Epoch {epoch} | 生成了 {len(collected_data)} 条数据，保存到 {data_dir}", color="green")
+        logger.info(f"PPO data 生成完成，共 {len(collected_data)} 条数据，保存到 {data_dir}")
     else:
         cprint(
-            f"[TDMAS] weighted-SFT data 已存在 | Epoch {epoch} | 从 {wsft_data_path} 加载", color="green")
-        logger.info(f"weighted-SFT data 已存在，从 {wsft_data_path} 加载")
+            f"[TDMAS] PPO data 已存在 | Epoch {epoch} | 从 {data_dir} 加载", color="green")
+        logger.info(f"PPO data 已存在，从 {data_dir} 加载")
 
 
     # 3. 优化模型

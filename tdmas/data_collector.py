@@ -57,15 +57,25 @@ class DataCollector:
             max_loop=max_loop,
             max_debug_attempts=max_debug_attempts,
             max_concurrent_execute_code=max_concurrent_execute_code,
+            logprobs=20
         )
         result = await mas.solve_problem(question_text, self.benchmark, problem)
 
         single_problem_train_data = []
         for turn_record in result["conversation_history"]:
+            logprobs = turn_record["logprobs"]
+            token_ids = turn_record["token_ids"]
+            logprobs = [lp[token_id].logprob for lp, token_id in zip(logprobs, token_ids)]
             single_problem_train_data.append({
                 "prompt": turn_record["prompt"],
                 "response": turn_record["response"],
-                "reward": calculate_reward(turn_record["supervision_score"], turn_record["consistency_score"], turn_record["input_tokens"], turn_record["output_tokens"]),
+                "logprobs": logprobs,
+                "reward": calculate_reward(
+                    turn_record["supervision_score"],
+                    turn_record["consistency_score"],
+                    turn_record["input_tokens"],
+                    turn_record["output_tokens"],
+                ),
             })
 
         # 获取问题ID

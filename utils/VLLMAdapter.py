@@ -3,13 +3,19 @@
 """
 VLLMAdapter for local large language models, compatible with all API calls
 """
+import os
+os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+os.environ["disable_custom_all_reduce"] = "True"
+os.environ["NCCL_IB_DISABLE"] = "True"
+os.environ["NCCL_P2P_DISABLE"] = "True"
+os.environ["NCCL_SOCKET_IFNAME"] = "lo"
+
 from transformers import AutoTokenizer
 from vllm import LLM, SamplingParams
 import logging
 import time
 from typing import List, Union, Dict
 import yaml
-import os
 import json
 
 os.environ.setdefault("VLLM_LOGGING_LEVEL", "WARNING")

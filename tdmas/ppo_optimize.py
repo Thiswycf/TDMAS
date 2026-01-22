@@ -10,18 +10,17 @@ import time
 import yaml
 import torch
 from torch import nn
-from torch.utils.data import Dataset
 import numpy as np
+import glob
+import shutil
+import re
 import matplotlib
 matplotlib.use('Agg')  # 使用非交互式后端
+import warnings
 import matplotlib.pyplot as plt
 from typing import List, Dict, Optional
 from datetime import datetime, timedelta
 from dataclasses import dataclass, field
-
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-from trl.trainer import PPOConfig, PPOTrainer
 from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 from transformers import (
     AutoTokenizer,
@@ -29,9 +28,20 @@ from transformers import (
     BitsAndBytesConfig,
 )
 
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+warnings.filterwarnings("ignore", category=UserWarning, module="peft")
+
 from metagpt.logs import logger
 from utils.llm_manager import LLMManager
-from utils.path_utils import ppo_data_file, finetuned_epoch_dir, ensure_dir, finetuned_model_path, build_model_name
+from utils.path_utils import (
+    ppo_data_file,
+    finetuned_epoch_dir,
+    ensure_dir,
+    finetuned_model_path,
+    build_model_name
+)
+
+
 # TRL PPO (experimental API used by TRL official example script)
 
 
@@ -43,6 +53,7 @@ class Args:
     # Models
     policy_model_name: str = field(default="Qwen3-8B")
     policy_model_path: str = field(default="../models/Qwen3-8B")
+    ref_policy_model_path: str = field(default="../models/Qwen3-8B")
 
     # Data
     dataset: str = field(default="")
@@ -94,6 +105,19 @@ def set_seed(seed: int):
     torch.cuda.manual_seed_all(seed)
 
 
+def find_latest_checkpoint(output_dir):
+    """查找最近的checkpoint目录"""
+    checkpoint_pattern = os.path.join(output_dir, "checkpoint-*")
+    checkpoint_dirs = glob.glob(checkpoint_pattern)
+    
+    if not checkpoint_dirs:
+        return None
+    
+    # 按数字序号排序（例如 checkpoint-100 > checkpoint-50）
+    checkpoint_dirs.sort(key=lambda x: int(x.split("-")[-1]), reverse=True)
+    return checkpoint_dirs[0]
+
+
 # -------------------------
 # Data Loading
 # -------------------------
@@ -105,44 +129,12 @@ def load_training_data(dataset: str, zcp: str, epoch: int) -> List[Dict]:
 
     logger.info(f"正在加载训练数据: {data_file}")
     with open(data_file, 'rb') as f:
-        collected_data = pickle.load(f)
+        training_samples = pickle.load(f)
 
-    logger.info(f"成功加载 {len(collected_data)} 条问题数据")
-    return collected_data
+    logger.info(f"成功加载 {len(training_samples)} 条训练样本")
 
-    # # 展开数据：将每个问题的所有turn展开为独立的训练样本
-    # training_samples = []
-    # for problem_data in collected_data:
-    #     problem_id = problem_data.get('problem_id', 'unknown')
-    #     question = problem_data.get('question', '')
-    #     correctness = problem_data.get('correctness', 0.0)
-    #     single_problem_train_data = problem_data.get(
-    #         'single_problem_train_data', [])
-
-    #     for turn_idx, turn_data in enumerate(single_problem_train_data):
-    #         prompt = turn_data.get('prompt', [])
-    #         response = turn_data.get('response', '')
-    #         reward_dict = turn_data.get('reward', {})
-
-    #         # 提取总奖励
-    #         if isinstance(reward_dict, dict):
-    #             total_reward = reward_dict.get('total_reward', 0.0)
-    #         else:
-    #             total_reward = float(
-    #                 reward_dict) if reward_dict is not None else 0.0
-
-    #         training_samples.append({
-    #             'problem_id': problem_id,
-    #             'question': question,
-    #             'correctness': correctness,
-    #             'prompt': prompt,
-    #             'response': response,
-    #             'reward': total_reward,
-    #             'turn_idx': turn_idx,
-    #         })
-
-    # logger.info(f"展开后共有 {len(training_samples)} 个训练样本")
-    # return training_samples
+    # 数据已经是turn级别，直接返回
+    return training_samples
 
 
 def format_prompt_for_tokenizer(tokenizer: AutoTokenizer, prompt: List) -> str:
@@ -189,6 +181,7 @@ class TrainingMonitor:
         self.kl_divergences = []
         self.learning_rates = []
         self.accuracies = []  # 基于correctness的准确率
+        self.value_losses = []  # Value Head的损失
 
         # 时间记录
         self.start_time = None
@@ -230,6 +223,8 @@ class TrainingMonitor:
             self.learning_rates.append(learning_rate)
         if accuracy is not None:
             self.accuracies.append(accuracy)
+        if stats and 'value_loss' in stats:
+            self.value_losses.append(stats['value_loss'])
 
         # 保存到JSONL文件
         metrics = {
@@ -338,8 +333,16 @@ class TrainingMonitor:
             axes[1, 0].set_title('KL Divergence')
             axes[1, 0].grid(True, alpha=0.3)
 
+        # Value Head损失曲线
+        if self.value_losses:
+            axes[1, 1].plot(self.steps, self.value_losses,
+                            'y-', linewidth=1.5, alpha=0.7)
+            axes[1, 1].set_xlabel('Step')
+            axes[1, 1].set_ylabel('Value Loss')
+            axes[1, 1].set_title('Value Head Loss')
+            axes[1, 1].grid(True, alpha=0.3)
         # 准确率曲线
-        if self.accuracies:
+        elif self.accuracies:
             axes[1, 1].plot(self.steps, self.accuracies,
                             'c-', linewidth=1.5, alpha=0.7)
             axes[1, 1].set_xlabel('Step')
@@ -381,28 +384,220 @@ class TrainingMonitor:
         return summary
 
 
-class DummyRewardModel(nn.Module):
-    """占位奖励模型，仅用于满足PPOTrainer对reward_model的device迁移要求"""
-    def __init__(self):
+class PPOLoss(nn.Module):
+    """PPO损失函数"""
+
+    def __init__(self, clip_range: float = 0.2, kl_coef: float = 0.02):
         super().__init__()
-        self.register_buffer("dummy_value", torch.tensor(0.0))
-    def forward(self, *args, **kwargs):
-        return self.dummy_value
+        self.clip_range = clip_range
+        self.kl_coef = kl_coef
 
-class ConstantLengthDataset(Dataset):
-    """用于PPOTrainer初始化的占位Dataset，不参与实际训练"""
-    def __init__(self, length: int, pad_token_id: int):
-        self.length = length
-        self.pad_token_id = pad_token_id
+    def forward(
+        self,
+        new_log_probs: torch.Tensor,
+        old_log_probs: torch.Tensor,
+        advantages: torch.Tensor,
+        new_log_probs_ref: Optional[torch.Tensor] = None,
+    ) -> Dict[str, torch.Tensor]:
+        """
+        Args:
+            new_log_probs: [batch_size, seq_len] 当前策略的log概率
+            old_log_probs: [batch_size, seq_len] 旧策略的log概率
+            advantages: [batch_size, seq_len] 优势函数值
+            new_log_probs_ref: [batch_size, seq_len] 参考策略的log概率（可选，用于KL惩罚）
 
-    def __len__(self):
-        return self.length
+        Returns:
+            包含各种损失的字典
+        """
+        # 计算概率比率
+        ratio = torch.exp(new_log_probs - old_log_probs)
 
-    def __getitem__(self, idx):
+        # 计算未裁剪的PPO损失
+        surr1 = ratio * advantages
+        # 计算裁剪后的PPO损失
+        surr2 = torch.clamp(ratio, 1.0 - self.clip_range, 1.0 + self.clip_range) * advantages
+
+        # PPO损失（取最小值）
+        policy_loss = -torch.min(surr1, surr2).mean()
+
+        # KL散度惩罚
+        kl_divergence = None
+        if new_log_probs_ref is not None:
+            kl_divergence = (old_log_probs - new_log_probs_ref).mean()
+            kl_loss = self.kl_coef * kl_divergence
+        else:
+            kl_loss = torch.tensor(0.0, device=new_log_probs.device)
+
+        # 总损失
+        total_loss = policy_loss + kl_loss
+
         return {
-            "input_ids": torch.tensor([self.pad_token_id], dtype=torch.long),
-            "attention_mask": torch.tensor([1], dtype=torch.long),
+            "total_loss": total_loss,
+            "policy_loss": policy_loss,
+            "kl_loss": kl_loss,
+            "kl_divergence": kl_divergence,
+            "ratio": ratio.mean(),
         }
+
+
+class ValueHead(nn.Module):
+    """Value Head用于估计状态价值baseline"""
+
+    def __init__(self, hidden_size: int, dropout: float = 0.1):
+        super().__init__()
+        self.value_head = nn.Sequential(
+            nn.Linear(hidden_size, hidden_size // 2),
+            nn.Tanh(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_size // 2, 1),
+        )
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            hidden_states: [batch_size, seq_len, hidden_size] 隐藏状态
+
+        Returns:
+            [batch_size, seq_len, 1] 价值估计
+        """
+        # 将hidden_states转换为float32类型，与ValueHead的权重保持一致
+        hidden_states = hidden_states.to(torch.float32)
+        values = self.value_head(hidden_states)
+        return values.squeeze(-1)  # [batch_size, seq_len]
+
+
+def collate_batch(
+    samples: List[Dict],
+    tokenizer: AutoTokenizer,
+    max_prompt_len: int,
+    max_new_tokens: int,
+    device: torch.device,
+) -> Dict[str, torch.Tensor]:
+    """
+    将样本批次整理为模型输入格式
+
+    Args:
+        samples: 样本列表
+        tokenizer: tokenizer对象
+        max_prompt_len: 最大prompt长度
+        max_new_tokens: 最大生成token数
+        device: 设备
+
+    Returns:
+        包含模型输入和标签的字典
+    """
+    batch_prompts = []
+    batch_responses = []
+    batch_old_logprobs = []
+    batch_rewards = []
+
+    for sample in samples:
+        # 格式化prompt
+        prompt_str = format_prompt_for_tokenizer(tokenizer, sample['prompt'])
+        batch_prompts.append(prompt_str)
+        batch_responses.append(sample['response'])
+
+        # 处理old_logprobs
+        old_logprobs = sample['logprobs'] # List[Dict[int, Logprob]]
+        # 转换为tensor并截断/填充
+        old_logprobs_tensor = torch.tensor(old_logprobs, dtype=torch.float32)
+        if len(old_logprobs_tensor) > max_new_tokens:
+            old_logprobs_tensor = old_logprobs_tensor[:max_new_tokens]
+        # 如果长度不足，填充到max_new_tokens
+        elif len(old_logprobs_tensor) < max_new_tokens:
+            pad_len = max_new_tokens - len(old_logprobs_tensor)
+            old_logprobs_tensor = torch.cat([old_logprobs_tensor, torch.zeros(pad_len, dtype=torch.float32)])
+        batch_old_logprobs.append(old_logprobs_tensor)
+
+        # 处理reward（实际数据中是字典）
+        reward_dict = sample['reward']
+        total_reward = reward_dict['total_reward']
+        batch_rewards.append(total_reward)
+
+    # Tokenize prompts
+    q = tokenizer(
+        batch_prompts,
+        return_tensors="pt",
+        padding=True,
+        truncation=True,
+        max_length=max_prompt_len,
+    )
+    q_input_ids = q["input_ids"].to(device)
+    q_attention_mask = q["attention_mask"].to(device)
+
+    # Tokenize responses
+    r = tokenizer(
+        batch_responses,
+        return_tensors="pt",
+        padding=True,
+        truncation=True,
+        max_length=max_new_tokens,
+    )
+    r_input_ids = r["input_ids"].to(device)
+    r_attention_mask = r["attention_mask"].to(device)
+
+    # 填充old_logprobs到相同长度
+    max_logprob_len = max(len(lp) for lp in batch_old_logprobs)
+    padded_old_logprobs = torch.zeros(len(batch_old_logprobs), max_logprob_len, dtype=torch.float32, device=device)
+    for i, lp in enumerate(batch_old_logprobs):
+        padded_old_logprobs[i, :len(lp)] = lp
+
+    # 转换rewards为tensor
+    rewards_tensor = torch.tensor(batch_rewards, dtype=torch.float32, device=device)
+
+    return {
+        "q_input_ids": q_input_ids,
+        "q_attention_mask": q_attention_mask,
+        "r_input_ids": r_input_ids,
+        "r_attention_mask": r_attention_mask,
+        "old_logprobs": padded_old_logprobs,
+        "rewards": rewards_tensor,
+    }
+
+
+def compute_advantages(
+    rewards: torch.Tensor,
+    hidden_states: torch.Tensor,
+    value_head: nn.Module,
+    gamma: float = 0.99,
+    lam: float = 0.95,
+) -> torch.Tensor:
+    """
+    使用Value Head估计baseline，并计算advantage
+
+    Args:
+        rewards: [batch_size] 奖励值
+        hidden_states: [batch_size, seq_len, hidden_size] 模型的隐藏状态
+        value_head: Value Head模型
+        gamma: 折扣因子
+        lam: GAE参数
+
+    Returns:
+        [batch_size, seq_len] 优势函数值
+    """
+    batch_size, seq_len, _ = hidden_states.shape
+
+    # 使用Value Head估计baseline
+    with torch.no_grad():
+        baseline = value_head(hidden_states)  # [batch_size, seq_len]
+
+    # 扩展rewards到序列维度
+    rewards_expanded = rewards.unsqueeze(-1).expand(-1, seq_len)
+
+    # 计算GAE (Generalized Advantage Estimation)
+    advantages = torch.zeros_like(rewards_expanded)
+    for i in range(batch_size):
+        gae = 0.0
+        for t in reversed(range(seq_len)):
+            delta = rewards_expanded[i, t] + gamma * baseline[i, t] - baseline[i, t]
+            gae = delta + gamma * lam * gae
+            advantages[i, t] = gae
+
+    # 归一化优势
+    advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+
+    return advantages
+
 
 def load_config(config_path: str = "config/running_config.yaml") -> dict:
     """加载配置文件"""
@@ -442,7 +637,7 @@ def main():
 
     # 构建参数对象，从配置文件读取参数
     args = Args(
-        policy_model_name=config.get('model_name'),
+        policy_model_name=optimize_config.get('policy_model'),
         dataset=cli.dataset,
         epoch=cli.epoch,
         zcp=cli.zcp,
@@ -451,7 +646,7 @@ def main():
         max_new_tokens=optimize_config.get('max_new_tokens', 1024),
         temperature=optimize_config.get('temperature', 0.7),
         top_p=optimize_config.get('top_p', 0.9),
-        learning_rate=optimize_config.get('learning_rate', 1e-6),
+        learning_rate=float(optimize_config.get('learning_rate', 1e-6)),
         total_episodes=optimize_config.get('total_episodes', 1000),
         per_device_train_batch_size=optimize_config.get(
             'per_device_train_batch_size', 1),
@@ -459,12 +654,12 @@ def main():
             'gradient_accumulation_steps', 8),
         num_ppo_epochs=optimize_config.get('num_ppo_epochs', 1),
         num_mini_batches=optimize_config.get('num_mini_batches', 1),
-        kl_coef=optimize_config.get('kl_coef', 0.02),
-        missing_eos_penalty=optimize_config.get('missing_eos_penalty', 1.0),
+        kl_coef=float(optimize_config.get('kl_coef', 0.02)),
+        missing_eos_penalty=float(optimize_config.get('missing_eos_penalty', 1.0)),
         use_lora=get_bool(optimize_config.get('use_lora', True)),
         lora_r=optimize_config.get('lora_r', 16),
         lora_alpha=optimize_config.get('lora_alpha', 32),
-        lora_dropout=optimize_config.get('lora_dropout', 0.05),
+        lora_dropout=float(optimize_config.get('lora_dropout', 0.05)),
         load_in_4bit=get_bool(optimize_config.get('load_in_4bit', True)),
         bnb_4bit_compute_dtype=optimize_config.get(
             'bnb_4bit_compute_dtype', 'bfloat16'),
@@ -475,7 +670,7 @@ def main():
         plot_steps=optimize_config.get('plot_steps', 50),
     )
 
-    os.environ["CUDA_VISIBLE_DEVICES"] = LLMManager._allocate_gpus(llm_memory=65.0)["cuda_visible_devices"]
+    os.environ["CUDA_VISIBLE_DEVICES"] = LLMManager._allocate_gpus(llm_memory=40.0)["cuda_visible_devices"]
 
     # 加载 local_llm 配置文件
     local_llm_config_path = "config/local_llm.yaml"
@@ -483,9 +678,10 @@ def main():
         raise FileNotFoundError(f"配置文件不存在: {local_llm_config_path}")
 
     args.policy_model_name = build_model_name(args.policy_model_name, args.dataset, args.zcp, args.epoch)
+    local_llm_config = load_config(local_llm_config_path)
+    args.ref_policy_model_path = local_llm_config["models"][args.policy_model_name]["model_path"]
     if 'finetuned' not in args.policy_model_name:
-        local_llm_config = load_config(local_llm_config_path)
-        args.policy_model_path = local_llm_config["models"][args.policy_model_name]["model_path"]
+        args.policy_model_path = args.ref_policy_model_path
     else:
         args.policy_model_path = finetuned_model_path(args.dataset, args.zcp, args.epoch)
 
@@ -522,7 +718,7 @@ def main():
         tokenizer.add_special_tokens({"pad_token": "[PAD]"})
 
     # -------------------------
-    # Policy model + LoRA
+    # Model + LoRA
     # -------------------------
     quant_config = None
     if args.load_in_4bit:
@@ -549,7 +745,15 @@ def main():
 
     policy.resize_token_embeddings(len(tokenizer))
 
-    ref_policy = None
+    # 创建参考策略（用于KL散度）
+    ref_policy = AutoModelForCausalLM.from_pretrained(
+        args.ref_policy_model_path,
+        trust_remote_code=True,
+        torch_dtype=torch.bfloat16,
+        device_map="auto",
+        quantization_config=quant_config,
+    )
+    ref_policy.eval()
 
     if args.use_lora:
         if args.load_in_4bit:
@@ -566,35 +770,66 @@ def main():
         policy = get_peft_model(policy, lora_cfg)
 
     # -------------------------
-    # PPO Trainer
+    # PPO Loss & Optimizer
     # -------------------------
-    ppo_config = PPOConfig(
-        output_dir=output_dir,
-        learning_rate=args.learning_rate,
-        total_episodes=args.total_episodes,
-        per_device_train_batch_size=args.per_device_train_batch_size,
-        gradient_accumulation_steps=args.gradient_accumulation_steps,
-        num_ppo_epochs=args.num_ppo_epochs,
-        num_mini_batches=args.num_mini_batches,
-        kl_coef=args.kl_coef,
-        missing_eos_penalty=args.missing_eos_penalty,
-    )
+    ppo_loss_fn = PPOLoss(clip_range=0.2, kl_coef=args.kl_coef)
+    optimizer = torch.optim.AdamW(policy.parameters(), lr=args.learning_rate)
 
-    # PPOTrainer需要reward_model和Dataset实例才能完成初始化
-    placeholder_reward_model = DummyRewardModel()
-    placeholder_dataset = ConstantLengthDataset(
-        length=len(training_samples),
-        pad_token_id=tokenizer.pad_token_id
-    )
+    # -------------------------
+    # Value Head
+    # -------------------------
+    # 获取模型的隐藏层大小
+    hidden_size = policy.config.hidden_size
+    value_head = ValueHead(hidden_size, dropout=0.1).to(device)
+    value_optimizer = torch.optim.AdamW(value_head.parameters(), lr=args.learning_rate)
 
-    trainer = PPOTrainer(
-        args=ppo_config,
-        processing_class=tokenizer,
-        model=policy,
-        ref_model=ref_policy,
-        reward_model=placeholder_reward_model,
-        train_dataset=placeholder_dataset,
-    )
+    # -------------------------
+    # Check Final Model
+    # -------------------------
+    final_dir = finetuned_model_path(args.dataset, args.zcp, args.epoch + 1)
+    final_model_exists = os.path.exists(final_dir)
+    
+    if final_model_exists:
+        logger.info(f"检测到已存在final模型: {final_dir}")
+        
+        # 检查是否为合并后的完整模型
+        # 完整模型会包含pytorch_model.bin或model.safetensors等文件
+        # 检测是否存在合并后的完整模型文件
+        # 1) 单文件权重
+        single_files = ['pytorch_model.bin', 'model.safetensors', 'consolidated.00.pth']
+        has_single = any(os.path.exists(os.path.join(final_dir, f)) for f in single_files)
+
+        # 2) 多文件权重（至少包含一个 model-00001-of-*.safetensors 或 .bin）
+        shard_files = os.listdir(final_dir)
+        has_shards = any(
+            re.fullmatch(r'model-\d{5}-of-\d{5}\.(safetensors|bin)', f)
+            for f in shard_files
+        )
+
+        is_merged = has_single or has_shards
+        if is_merged:
+            logger.info("已存在合并后的完整模型，跳过本次训练")
+            logger.info("=" * 60)
+            logger.info("训练已跳过!")
+            logger.info("使用已存在的合并后模型")
+            logger.info("=" * 60)
+            return
+        else:
+            logger.info("检测到未合并的模型，开始合并权重...")
+            # 如果使用了LoRA，合并权重
+            if args.use_lora and hasattr(policy, 'merge_and_unload'):
+                try:
+                    policy = policy.merge_and_unload()
+                    policy.save_pretrained(final_dir)
+                    tokenizer.save_pretrained(final_dir)
+                    logger.info("权重合并完成并已保存")
+                    logger.info("=" * 60)
+                    logger.info("权重合并已完成!")
+                    logger.info("=" * 60)
+                    return
+                except Exception as e:
+                    logger.warning(f"合并权重失败: {str(e)}")
+                    logger.info("将继续进行完整训练")
 
     # -------------------------
     # Training Monitor
@@ -605,119 +840,189 @@ def main():
     # -------------------------
     # Training loop
     # -------------------------
-    gen_kwargs = dict(
-        max_new_tokens=args.max_new_tokens,
-        do_sample=True,
-        temperature=args.temperature,
-        top_p=args.top_p,
-        pad_token_id=tokenizer.pad_token_id,
-        eos_token_id=tokenizer.eos_token_id,
-    )
-
     global_step = 0
     sample_idx = 0
     n_samples = len(training_samples)
 
+    # 检查是否有最近的checkpoint
+    latest_checkpoint = find_latest_checkpoint(output_dir)
+    if latest_checkpoint:
+        logger.info(f"找到最近的checkpoint: {latest_checkpoint}")
+        logger.info("从checkpoint继续训练...")
+        
+        # 从checkpoint加载模型
+        policy = AutoModelForCausalLM.from_pretrained(
+            latest_checkpoint,
+            trust_remote_code=True,
+            torch_dtype=torch.bfloat16,
+            device_map="auto",
+            quantization_config=quant_config,
+        )
+        
+        # 从checkpoint加载optimizer状态
+        optimizer_path = os.path.join(latest_checkpoint, "optimizer.pt")
+        if os.path.exists(optimizer_path):
+            optimizer.load_state_dict(torch.load(optimizer_path))
+            logger.info("已加载optimizer状态")
+        
+        # 从checkpoint目录名提取global_step
+        checkpoint_step = int(latest_checkpoint.split("-")[-1])
+        global_step = checkpoint_step
+        logger.info(f"已恢复到step: {global_step}")
+    else:
+        logger.info("没有找到checkpoint，从头开始训练...")
+
     logger.info(f"开始训练循环 | 总步数: {args.total_episodes} | 总样本数: {n_samples}")
+
+    policy.train()
 
     while global_step < args.total_episodes:
         # 准备批次数据
-        batch_prompts = []
-        batch_reference_rewards = []  # 参考reward（来自收集的数据）
-        batch_correctness = []
-
+        batch_samples = []
         for _ in range(args.per_device_train_batch_size):
-            sample = training_samples[sample_idx % n_samples]
+            batch_samples.append(training_samples[sample_idx % n_samples])
             sample_idx += 1
 
-            # 格式化prompt
-            prompt_str = format_prompt_for_tokenizer(
-                tokenizer, sample['prompt'])
-            batch_prompts.append(prompt_str)
-
-            # 保存参考reward（用于监控）
-            batch_reference_rewards.append(sample['reward'])
-
-            # 记录correctness用于准确率计算
-            batch_correctness.append(sample['correctness'])
-
-        # Tokenize prompts
-        q = tokenizer(
-            batch_prompts,
-            return_tensors="pt",
-            padding=True,
-            truncation=True,
-            max_length=args.max_prompt_len,
+        # 整理批次
+        batch = collate_batch(
+            batch_samples,
+            tokenizer,
+            args.max_prompt_len,
+            args.max_new_tokens,
+            device,
         )
-        q_input_ids = q["input_ids"].to(trainer.accelerator.device)
-        q_attention_mask = q["attention_mask"].to(trainer.accelerator.device)
 
-        # 从当前策略生成responses（这才是真正的PPO）
+        # 计算当前策略的log概率
         with torch.no_grad():
-            response_ids = trainer.generate(
-                q_input_ids,
-                attention_mask=q_attention_mask,
-                **gen_kwargs,
+            # 使用参考策略计算log概率
+            ref_outputs = ref_policy(
+                batch["r_input_ids"],
+                attention_mask=batch["r_attention_mask"],
+                labels=batch["r_input_ids"],
             )
+            ref_logits = ref_outputs.logits
 
-        # Decode responses（用于监控）
-        responses = []
-        for i in range(response_ids.shape[0]):
-            prompt_len = q_attention_mask[i].sum().item()
-            gen_part = response_ids[i, int(prompt_len):]
-            text = tokenizer.decode(gen_part, skip_special_tokens=True).strip()
-            responses.append(text)
+        # 计算当前策略的log概率
+        policy_outputs = policy(
+            batch["r_input_ids"],
+            attention_mask=batch["r_attention_mask"],
+            labels=batch["r_input_ids"],
+            output_hidden_states=True,
+        )
+        policy_logits = policy_outputs.logits
+        hidden_states = policy_outputs.hidden_states[-1]  # 使用最后一层的隐藏状态
 
-        # 计算rewards
-        rewards = torch.tensor(
-            batch_reference_rewards, dtype=torch.float32, device=trainer.accelerator.device)
+        # 使用 Value Head 估计 baseline
+        baseline = value_head(hidden_states)  # [batch_size, seq_len]
 
-        # PPO step
-        stats = trainer.step(q_input_ids, response_ids, rewards)
+        # 计算 advantage: reward - baseline
+        rewards = batch["rewards"]  # [batch_size]
+        # 扩展 rewards 到序列维度
+        seq_len = baseline.shape[1]
+        advantages = rewards.unsqueeze(-1).expand(-1, seq_len) - baseline
+
+        # 归一化 advantage
+        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+
+        # 计算log概率
+        # shift logits和labels以对齐
+        shift_logits = policy_logits[..., :-1, :].contiguous()
+        shift_labels = batch["r_input_ids"][..., 1:].contiguous()
+        shift_ref_logits = ref_logits[..., :-1, :].contiguous()
+
+        # 计算log概率
+        log_probs = torch.nn.functional.log_softmax(shift_logits, dim=-1)
+        new_log_probs = torch.gather(log_probs, -1, shift_labels.unsqueeze(-1)).squeeze(-1)
+
+        # 计算参考策略的log概率
+        ref_log_probs = torch.nn.functional.log_softmax(shift_ref_logits, dim=-1)
+        new_log_probs_ref = torch.gather(ref_log_probs, -1, shift_labels.unsqueeze(-1)).squeeze(-1)
+
+        # 调整old_logprobs的长度以匹配
+        old_logprobs = batch["old_logprobs"]
+        if old_logprobs.shape[1] != new_log_probs.shape[1]:
+            if old_logprobs.shape[1] > new_log_probs.shape[1]:
+                old_logprobs = old_logprobs[:, :new_log_probs.shape[1]]
+            else:
+                pad_len = new_log_probs.shape[1] - old_logprobs.shape[1]
+                old_logprobs = torch.nn.functional.pad(old_logprobs, (0, pad_len))
+
+        # 调整advantages的长度
+        if advantages.shape[1] != new_log_probs.shape[1]:
+            if advantages.shape[1] > new_log_probs.shape[1]:
+                advantages = advantages[:, :new_log_probs.shape[1]]
+            else:
+                pad_len = new_log_probs.shape[1] - advantages.shape[1]
+                advantages = torch.nn.functional.pad(advantages, (0, pad_len))
+
+        # 计算PPO损失
+        loss_dict = ppo_loss_fn(
+            new_log_probs,
+            old_logprobs,
+            advantages,
+            new_log_probs_ref,
+        )
+
+        loss = loss_dict["total_loss"]
+
+        # 计算 Value Head 的损失 (MSE loss: (value - target)^2)
+        # 使用奖励作为目标值
+        value_targets = rewards.unsqueeze(-1).expand(-1, seq_len)
+        value_loss = nn.functional.mse_loss(baseline, value_targets)
+
+        # 总损失 = PPO损失 + Value Head损失
+        total_loss = loss + value_loss
+
+        # 反向传播
+        total_loss = total_loss / args.gradient_accumulation_steps
+        total_loss.backward()
+
+        # 梯度累积
+        if (global_step + 1) % args.gradient_accumulation_steps == 0:
+            # 梯度裁剪
+            torch.nn.utils.clip_grad_norm_(policy.parameters(), max_norm=1.0)
+            torch.nn.utils.clip_grad_norm_(value_head.parameters(), max_norm=1.0)
+            # 更新参数
+            optimizer.step()
+            value_optimizer.step()
+            optimizer.zero_grad()
+            value_optimizer.zero_grad()
 
         global_step += 1
 
         # 计算指标
-        avg_reward = rewards.mean().item()
-        avg_correctness = np.mean(batch_correctness)
-        # 从stats中提取各种指标
-        loss = stats.get("ppo/loss/total", stats.get("objective/kl", 0.0))
-        kl = stats.get("ppo/objective/kl", stats.get("objective/kl", None))
-        policy_loss = stats.get("ppo/policy/mean", None)
-        value_loss = stats.get("ppo/value/mean", None)
-        entropy = stats.get("ppo/entropy/mean", None)
-        lr = stats.get("learning_rate", args.learning_rate)
+        avg_reward = batch["rewards"].mean().item()
+        loss_value = loss_dict["total_loss"].item()
+        value_loss_value = value_loss.item()
+        policy_loss_value = loss_dict["policy_loss"].item()
+        kl_divergence_value = loss_dict["kl_divergence"].item() if loss_dict["kl_divergence"] is not None else 0.0
+        ratio_value = loss_dict["ratio"].item()
 
         # 记录指标
         monitor.log_step(
             step=global_step,
-            loss=loss,
+            loss=loss_value,
             reward=avg_reward,
-            kl_divergence=kl,
-            learning_rate=lr,
-            accuracy=avg_correctness,
+            kl_divergence=kl_divergence_value,
+            learning_rate=args.learning_rate,
+            accuracy=None,
             stats={
-                **stats,
-                "policy_loss": policy_loss,
-                "value_loss": value_loss,
-                "entropy": entropy,
+                "policy_loss": policy_loss_value,
+                "value_loss": value_loss_value,
+                "ratio": ratio_value,
             },
         )
 
         # 打印日志
-        if global_step % args.log_steps == 0 and trainer.accelerator.is_main_process:
+        if global_step % args.log_steps == 0:
             remaining_time = monitor.estimate_remaining_time(
                 global_step, args.total_episodes)
-            kl_display = f"{kl:.4f}" if kl is not None else "N/A"
             log_msg = (
                 f"[Step {global_step}/{args.total_episodes}] "
-                f"Loss: {loss:.4f} | Reward: {avg_reward:.4f} | "
-                f"KL: {kl_display} | Accuracy: {avg_correctness:.4f}"
+                f"Loss: {loss_value:.4f} | Value Loss: {value_loss_value:.4f} | Reward: {avg_reward:.4f} | "
+                f"KL: {kl_divergence_value:.4f} | "
+                f"Ratio: {ratio_value:.4f}"
             )
-            if policy_loss is not None:
-                log_msg += f" | Policy Loss: {policy_loss:.4f}"
-            if value_loss is not None:
-                log_msg += f" | Value Loss: {value_loss:.4f}"
             log_msg += f" | 剩余时间: {remaining_time}"
             logger.info(log_msg)
 
@@ -725,27 +1030,51 @@ def main():
         if global_step % args.save_steps == 0:
             checkpoint_dir = os.path.join(
                 output_dir, f"checkpoint-{global_step}")
-            trainer.save_pretrained(checkpoint_dir)
+            policy.save_pretrained(checkpoint_dir)
+            tokenizer.save_pretrained(checkpoint_dir)
             logger.info(f"检查点已保存: {checkpoint_dir}")
 
-    # 最终保存
-    final_dir = finetuned_model_path(args.dataset, args.zcp, args.epoch)
-    trainer.save_pretrained(final_dir)
+    # 如果使用了LoRA，先合并权重到基础模型
+    if args.use_lora and hasattr(policy, 'merge_and_unload'):
+        logger.info("正在合并LoRA权重到基础模型...")
+        try:
+            policy = policy.merge_and_unload()
+            logger.info("LoRA权重合并完成")
+        except Exception as e:
+            logger.warning(f"合并LoRA权重失败: {str(e)}")
+            logger.warning("将保存未合并的LoRA模型")
+
+    policy.save_pretrained(final_dir)
+    tokenizer.save_pretrained(final_dir)
     logger.info(f"最终模型已保存: {final_dir}")
 
     # 保存训练总结
     summary = monitor.save_summary(args.total_episodes)
     monitor.plot_metrics()  # 最终绘制一次
 
-    if trainer.accelerator.is_main_process:
-        logger.info("=" * 60)
-        logger.info("训练完成!")
-        logger.info(f"总步数: {args.total_episodes}")
-        logger.info(f"总时间: {summary.get('total_time_formatted', 'N/A')}")
-        logger.info(f"最终Loss: {summary.get('final_loss', 'N/A')}")
-        logger.info(f"最终Reward: {summary.get('final_reward', 'N/A')}")
-        logger.info(f"最终准确率: {summary.get('final_accuracy', 'N/A')}")
-        logger.info("=" * 60)
+    # -------------------------
+    # Delete All Checkpoints
+    # -------------------------
+    logger.info("开始清理checkpoint...")
+    checkpoint_pattern = os.path.join(output_dir, "checkpoint-*")
+    checkpoint_dirs = glob.glob(checkpoint_pattern)
+    
+    for checkpoint_dir in checkpoint_dirs:
+        try:
+            shutil.rmtree(checkpoint_dir)
+            logger.info(f"已删除checkpoint: {checkpoint_dir}")
+        except Exception as e:
+            logger.warning(f"删除checkpoint失败: {checkpoint_dir}, 错误: {str(e)}")
+    
+    logger.info("checkpoint清理完成")
+
+    logger.info("=" * 60)
+    logger.info("训练完成!")
+    logger.info(f"总步数: {args.total_episodes}")
+    logger.info(f"总时间: {summary.get('total_time_formatted', 'N/A')}")
+    logger.info(f"最终Loss: {summary.get('final_loss', 'N/A')}")
+    logger.info(f"最终Reward: {summary.get('final_reward', 'N/A')}")
+    logger.info("=" * 60)
 
 
 if __name__ == "__main__":

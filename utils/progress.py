@@ -47,7 +47,7 @@ async def run_tasks_with_progress(
         term_size = shutil.get_terminal_size(fallback=(80, 20))
         cols = term_size.columns
         usable_len = cols - (len(desc) + 3 + 2 + 80)
-        return max(10, usable_len)
+        return max(5, usable_len)
 
     bar_len = get_bar_len()
 

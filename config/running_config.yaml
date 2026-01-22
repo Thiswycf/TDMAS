@@ -2,9 +2,9 @@
 
 # general
 dataset: AIME24 # datasets: GSM8K, AIME24, GPQA
-task_type: full_pipeline # full_pipeline, infer_only, train_only
-start_epoch: 4 # start epoch
-end_epoch: 5 # end epoch
+task_type: train_only # full_pipeline, infer_only, train_only
+start_epoch: 0 # start epoch
+end_epoch: 1 # end epoch
 train_ask_num: 8 # Number of repeated asks to train
 test_ask_num: 5 # Number of repeated asks for stable test
 max_depth: 5 # max depth of the problem
@@ -34,16 +34,16 @@ limit: 10000 # No limit
 max_concurrent_request: 512 # max concurrent requests to the LLM
 max_concurrent_execute_code: 128 # max concurrent requests to execute code
 
-# optimize (weighted-SFT training)
+# optimize (PPO training)
 optimize_config:
-  policy_model: Qwen/Qwen3-8B # Policy model name
+  policy_model: Qwen3-8B # Policy model name
   seed: 42 # Random seed
   max_prompt_len: 2048 # Max prompt length
   max_new_tokens: 1024 # Max new tokens to generate
   temperature: 0.7 # Sampling temperature
   top_p: 0.9 # Top-p sampling
   learning_rate: 1e-6 # Learning rate
-  total_episodes: 50 # Total training episodes/steps
+  total_episodes: 1000 # Total training episodes/steps
   per_device_train_batch_size: 1 # Batch size per device
   gradient_accumulation_steps: 8 # Gradient accumulation steps
   num_wsft_epochs: 1 # Number of weighted-SFT epochs
@@ -57,6 +57,6 @@ optimize_config:
   load_in_4bit: false # Load model in 4-bit quantization
   bnb_4bit_compute_dtype: bfloat16 # 4-bit compute dtype: bfloat16 or float16
   enable_thinking: false # Enable thinking mode (for Qwen3)
-  save_steps: 32 # Save checkpoint every N steps
-  log_steps: 8 # Log metrics every N steps
+  save_steps: 200 # Save checkpoint every N steps
+  log_steps: 50 # Log metrics every N steps
   max_train_samples: 4096 # Max training samples of one epoch

@@ -80,9 +80,15 @@ def temp_generate_dir(data_set: str, zcp: str) -> str:
 def wsft_data_dir(data_set: str, zcp: str) -> str:
     return workspace_path("output_wsft_data", data_set, zcp)
 
-
 def wsft_data_file(data_set: str, zcp: str, epoch: int | str) -> str:
     return os.path.join(wsft_data_dir(data_set, zcp), f"wsft_data-{epoch}.pkl")
+
+
+def ppo_data_dir(data_set: str, zcp: str) -> str:
+    return workspace_path("output_ppo_data", data_set, zcp)
+
+def ppo_data_file(data_set: str, zcp: str, epoch: int | str) -> str:
+    return os.path.join(ppo_data_dir(data_set, zcp), f"ppo_data-{epoch}.pkl")
 
 
 def preference_data_dir(data_set: str, zcp: str) -> str:

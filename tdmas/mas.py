@@ -72,6 +72,8 @@ class Agent:
     def _record_turn(
         self,
         response_text: str,
+        logprobs: List[Dict[int, float]],
+        token_ids: List[Tuple[str, int]],
         input_tokens: int,
         output_tokens: int,
     ) -> None:
@@ -83,6 +85,8 @@ class Agent:
             "turn": self.turn_to_superior,
             "prompt": deepcopy(self.input_conversation),
             "response": response_text,
+            "logprobs": logprobs,
+            "token_ids": token_ids,
             "use_chat_template": self.use_chat_template,
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,
@@ -99,7 +103,7 @@ class Agent:
         """释放（解散）当前 agent 的所有下级 agent。"""
         self.children.clear()
 
-    async def _call_llm(self, prompt: Union[str, List[Dict[str, str]]]) -> Tuple[str, int, int]:
+    async def _call_llm(self, prompt: Union[str, List[Dict[str, str]]]) -> Tuple[str, List[Dict[int, float]], List[Tuple[str, int]], int, int]:
         """代理 MAS 统一的 LLM 调用，方便未来在 Agent 级别扩展额外信息。"""
         return await self.mas._call_llm(prompt)
 
@@ -161,11 +165,11 @@ class Agent:
         while turn_to_subordinates < self.max_loop:
             turn_to_subordinates += 1
             
-            response_text, input_tokens, output_tokens = await self._call_llm(self.input_conversation)
+            response_text, logprobs, token_ids, input_tokens, output_tokens = await self._call_llm(self.input_conversation)
             parsed_response = parse_agent_response(response_text)
 
             # 记录对话与打分（自己给上级问题的打分/下级回复的打分）
-            output_id = self._record_turn(response_text, input_tokens, output_tokens)
+            output_id = self._record_turn(response_text, logprobs, token_ids, input_tokens, output_tokens)
             if turn_to_subordinates == 1:
                 saved_score = parsed_response.get("score")
                 saved_evaluation = parsed_response.get("evaluation")
@@ -209,11 +213,11 @@ class Agent:
                         )
                         
                         # 调用 LLM 获取调试后的代码
-                        debug_response_text, debug_input_tokens, debug_output_tokens = await self._call_llm(self.input_conversation)
+                        debug_response_text, logprobs, token_ids, debug_input_tokens, debug_output_tokens = await self._call_llm(self.input_conversation)
                         debug_parsed_response = parse_agent_response(debug_response_text)
                         
                         # 记录调试对话
-                        output_id = self._record_turn(debug_response_text, debug_input_tokens, debug_output_tokens)
+                        output_id = self._record_turn(debug_response_text, logprobs, token_ids, debug_input_tokens, debug_output_tokens)
                         
                         # 提取调试后的代码
                         answer = debug_parsed_response.get("answer", "")
@@ -388,6 +392,7 @@ class MultiAgentSystem:
         max_loop: int = 5,
         max_debug_attempts: int = 2,
         max_concurrent_execute_code: int = 128,
+        logprobs: Optional[int] = None,
     ):
         """
         Args:
@@ -409,7 +414,9 @@ class MultiAgentSystem:
         self.sampling_params = SamplingParams(
             temperature=temperature,
             top_p=0.95,
+            top_k=40,
             max_tokens=max_output_tokens,
+            logprobs=logprobs,
         )
         
         # 用于跟踪token消耗
@@ -437,20 +444,22 @@ class MultiAgentSystem:
         self.output_id_counter += 1
         return f"output_{self.output_id_counter}"
 
-    def record_output_id_score(self, output_id: str, score: float, type: str):
+    def record_output_id_score(self, output_id: str, score: float, type: str, is_label: bool = False):
         """记录输出id的打分"""
+        if not is_label:
+            score *= 0.01 # 百分制得分
         if type == "supervision":
-            self.output_id_supervision_scores.setdefault(output_id, []).append(score * 0.01) # 百分制得分
+            self.output_id_supervision_scores.setdefault(output_id, []).append(score)
         elif type == "consistency":
-            self.output_id_consistency_scores.setdefault(output_id, []).append(score * 0.01) # 百分制得分
+            self.output_id_consistency_scores.setdefault(output_id, []).append(score)
         else:
             raise ValueError(f"Invalid score type: {type}. Must be 'supervision' or 'consistency'.")
     
-    async def _call_llm(self, prompt: Union[str, List[Dict[str, str]]]) -> Tuple[str, int, int]:
+    async def _call_llm(self, prompt: Union[str, List[Dict[str, str]]]) -> Tuple[str, List[Dict[int, float]], List[Tuple[str, int]], int, int]:
         """调用LLM并返回响应和token消耗
         
         Returns:
-            (response_text, input_tokens, output_tokens)
+            (response_text, logprobs, token_ids, input_tokens, output_tokens)
         """
         output = await get_global_llm_manager().generate(
             self.model_name,
@@ -458,7 +467,9 @@ class MultiAgentSystem:
             sampling_params=self.sampling_params
         )
         
-        response_text = output.outputs[0].text
+        response_text: str = output.outputs[0].text
+        logprobs: List[Dict[int, float]] = output.outputs[0].logprobs
+        token_ids: List[Tuple[str, int]] = output.outputs[0].token_ids
         
         # 使用tokenizer准确计算token数
         try:
@@ -526,9 +537,9 @@ class MultiAgentSystem:
         self.total_input_tokens += input_tokens_count
         self.total_output_tokens += output_tokens_count
         
-        return response_text, int(input_tokens_count), int(output_tokens_count)
+        return response_text, logprobs, token_ids, int(input_tokens_count), int(output_tokens_count)
     
-    async def judge(self, answer: str, benchmark: BaseBenchmark, problem: dict) -> bool:
+    async def judge(self, answer: str, benchmark: BaseBenchmark, problem: dict) -> float:
         """判断答案是否正确
 
         Args:
@@ -537,7 +548,7 @@ class MultiAgentSystem:
             problem: 问题字典
 
         Returns:
-            是否正确（True表示正确，False表示错误）
+            正确性（0-1之间的浮点数，1表示完全正确）
         """
 
         try:
@@ -555,12 +566,12 @@ class MultiAgentSystem:
                 gt_str = str(ground_truth).strip().lower()
                 answer_str = str(answer).strip().lower()
                 if answer_str == gt_str:
-                    return True
+                    return 1.0
                 else:
-                    return False
+                    return 0.0
         except Exception as e:
             logger.warning(f"计算正确性损失时出错: {type(e).__name__}\n{traceback.format_exc()}")
-            return False  # 出错时返回False
+            return 0.0  # 出错时返回0.0
 
     async def solve_problem(
         self,
@@ -586,9 +597,9 @@ class MultiAgentSystem:
         )
 
         correctness = await self.judge(result["answer"], benchmark, problem)
-        result["correctness"] = 1.0 if correctness else 0.0
+        result["correctness"] = correctness # 标签
         output_id = result["output_id"]
-        self.record_output_id_score(output_id, result["correctness"], "supervision")
+        self.record_output_id_score(output_id, result["correctness"], "supervision", is_label=True)
 
         # 标记奖励得分
         for turn_record in self.conversation_history:
@@ -598,7 +609,6 @@ class MultiAgentSystem:
             
             consistency_scores = self.output_id_consistency_scores.get(output_id, [])
             consistency_score = sum(consistency_scores) / len(consistency_scores) if consistency_scores else 0.0
-
 
             turn_record["supervision_score"] = supervision_score
             turn_record["consistency_score"] = consistency_score
