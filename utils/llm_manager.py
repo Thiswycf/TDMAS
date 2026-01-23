@@ -382,8 +382,8 @@ class LLMManager:
             # return 21.6 * 4 # NOTE: modified
         elif "7b" in model_name.lower() or "8b" in model_name.lower():
             # return 21.6
-            # return 21.6 * 1.2  # NOTE: modified
-            return 21.6 * 1.7  # NOTE: modified
+            return 21.6 * 1.4  # NOTE: modified
+            # return 21.6 * 1.7  # NOTE: modified
         elif "4B" in model_name or "4b" in model_name:
             return 21.6
         elif "tiny" in model_name.lower() or "1.1b" in model_name.lower():

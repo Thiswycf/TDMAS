@@ -2,9 +2,9 @@
 
 # general
 dataset: AIME24 # datasets: GSM8K, AIME24, GPQA
-task_type: train_only # full_pipeline, infer_only, train_only
-start_epoch: 0 # start epoch
-end_epoch: 1 # end epoch
+task_type: infer_only # full_pipeline, infer_only, train_only
+start_epoch: 1 # start epoch
+end_epoch: 2 # end epoch
 train_ask_num: 8 # Number of repeated asks to train
 test_ask_num: 5 # Number of repeated asks for stable test
 max_depth: 5 # max depth of the problem
@@ -54,7 +54,7 @@ optimize_config:
   lora_r: 16 # LoRA rank
   lora_alpha: 32 # LoRA alpha
   lora_dropout: 0.05 # LoRA dropout
-  load_in_4bit: false # Load model in 4-bit quantization
+  load_in_4bit: true # Load model in 4-bit quantization
   bnb_4bit_compute_dtype: bfloat16 # 4-bit compute dtype: bfloat16 or float16
   enable_thinking: false # Enable thinking mode (for Qwen3)
   save_steps: 200 # Save checkpoint every N steps

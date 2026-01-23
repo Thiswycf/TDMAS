@@ -420,10 +420,11 @@ class PPOLoss(nn.Module):
         # PPO损失（取最小值）
         policy_loss = -torch.min(surr1, surr2).mean()
 
-        # KL散度惩罚
+        # KL散度惩罚（使用当前策略和参考策略的KL散度）
         kl_divergence = None
         if new_log_probs_ref is not None:
-            kl_divergence = (old_log_probs - new_log_probs_ref).mean()
+            # KL(new || ref) = E[log(new) - log(ref)] = E[new_log_probs - new_log_probs_ref]
+            kl_divergence = (new_log_probs - new_log_probs_ref).mean()
             kl_loss = self.kl_coef * kl_divergence
         else:
             kl_loss = torch.tensor(0.0, device=new_log_probs.device)
@@ -677,9 +678,9 @@ def main():
     if not os.path.exists(local_llm_config_path):
         raise FileNotFoundError(f"配置文件不存在: {local_llm_config_path}")
 
-    args.policy_model_name = build_model_name(args.policy_model_name, args.dataset, args.zcp, args.epoch)
     local_llm_config = load_config(local_llm_config_path)
     args.ref_policy_model_path = local_llm_config["models"][args.policy_model_name]["model_path"]
+    args.policy_model_name = build_model_name(args.policy_model_name, args.dataset, args.zcp, args.epoch)
     if 'finetuned' not in args.policy_model_name:
         args.policy_model_path = args.ref_policy_model_path
     else:
@@ -688,7 +689,7 @@ def main():
     logger.info(f"已从配置文件加载参数: {config_path}")
 
     # 设置输出目录
-    output_dir = finetuned_epoch_dir(args.dataset, args.zcp, args.epoch)
+    output_dir = finetuned_epoch_dir(args.dataset, args.zcp, args.epoch + 1)
     ensure_dir(output_dir)
 
     set_seed(args.seed)
@@ -875,6 +876,12 @@ def main():
     logger.info(f"开始训练循环 | 总步数: {args.total_episodes} | 总样本数: {n_samples}")
 
     policy.train()
+    
+    # 用于reward归一化的统计信息
+    reward_mean = 0.0
+    reward_std = 1.0
+    reward_count = 0
+    reward_history = []
 
     while global_step < args.total_episodes:
         # 准备批次数据
@@ -915,13 +922,43 @@ def main():
         # 使用 Value Head 估计 baseline
         baseline = value_head(hidden_states)  # [batch_size, seq_len]
 
-        # 计算 advantage: reward - baseline
+        # 计算 advantage: 使用GAE (Generalized Advantage Estimation)
         rewards = batch["rewards"]  # [batch_size]
-        # 扩展 rewards 到序列维度
+        
+        # 更新reward统计信息（用于归一化）
+        reward_history.extend(rewards.cpu().tolist())
+        if len(reward_history) > 1000:  # 只保留最近1000个reward
+            reward_history = reward_history[-1000:]
+        if len(reward_history) > 10:
+            reward_mean = np.mean(reward_history)
+            reward_std = np.std(reward_history) + 1e-8
+        
+        # 可选：归一化rewards（使用移动平均）
+        if len(reward_history) > 10:
+            rewards_normalized = (rewards - reward_mean) / reward_std
+        else:
+            rewards_normalized = rewards
+        
         seq_len = baseline.shape[1]
-        advantages = rewards.unsqueeze(-1).expand(-1, seq_len) - baseline
-
-        # 归一化 advantage
+        
+        # 使用GAE计算advantage
+        gamma = 0.99
+        lam = 0.95
+        advantages = torch.zeros_like(baseline)
+        for i in range(baseline.shape[0]):
+            gae = 0.0
+            for t in reversed(range(seq_len)):
+                # 计算TD error
+                if t == seq_len - 1:
+                    # 最后一步：使用归一化后的reward
+                    delta = rewards_normalized[i] - baseline[i, t]
+                else:
+                    # 中间步：value_next - value（中间步没有reward）
+                    delta = gamma * baseline[i, t+1] - baseline[i, t]
+                gae = delta + gamma * lam * gae
+                advantages[i, t] = gae
+        
+        # 归一化 advantage（按batch和sequence维度）
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
         # 计算log概率
@@ -966,8 +1003,17 @@ def main():
         loss = loss_dict["total_loss"]
 
         # 计算 Value Head 的损失 (MSE loss: (value - target)^2)
-        # 使用奖励作为目标值
-        value_targets = rewards.unsqueeze(-1).expand(-1, seq_len)
+        # 使用累积奖励作为目标值（从当前步到序列结束的累积奖励）
+        value_targets = torch.zeros_like(baseline)
+        for i in range(baseline.shape[0]):
+            # 从后往前计算累积奖励（使用归一化后的reward）
+            cumulative_reward = rewards_normalized[i]
+            for t in reversed(range(seq_len)):
+                value_targets[i, t] = cumulative_reward
+                # 对于中间步，累积奖励需要折扣
+                if t > 0:
+                    cumulative_reward = cumulative_reward * gamma  # gamma=0.99
+        
         value_loss = nn.functional.mse_loss(baseline, value_targets)
 
         # 总损失 = PPO损失 + Value Head损失
@@ -997,6 +1043,10 @@ def main():
         policy_loss_value = loss_dict["policy_loss"].item()
         kl_divergence_value = loss_dict["kl_divergence"].item() if loss_dict["kl_divergence"] is not None else 0.0
         ratio_value = loss_dict["ratio"].item()
+        
+        # 记录advantage统计信息用于调试
+        avg_advantage = advantages.mean().item()
+        std_advantage = advantages.std().item()
 
         # 记录指标
         monitor.log_step(
@@ -1010,6 +1060,8 @@ def main():
                 "policy_loss": policy_loss_value,
                 "value_loss": value_loss_value,
                 "ratio": ratio_value,
+                "avg_advantage": avg_advantage,
+                "std_advantage": std_advantage,
             },
         )
 
@@ -1021,7 +1073,8 @@ def main():
                 f"[Step {global_step}/{args.total_episodes}] "
                 f"Loss: {loss_value:.4f} | Value Loss: {value_loss_value:.4f} | Reward: {avg_reward:.4f} | "
                 f"KL: {kl_divergence_value:.4f} | "
-                f"Ratio: {ratio_value:.4f}"
+                f"Ratio: {ratio_value:.4f} | "
+                f"Adv: {avg_advantage:.4f}±{std_advantage:.4f}"
             )
             log_msg += f" | 剩余时间: {remaining_time}"
             logger.info(log_msg)
