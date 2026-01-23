@@ -63,8 +63,8 @@ class DataCollector:
 
         single_problem_train_data = []
         for turn_record in result["conversation_history"]:
-            logprobs = turn_record["logprobs"]
-            token_ids = turn_record["token_ids"]
+            logprobs = turn_record["logprobs"] # List[Dict[int, Logprob]]
+            token_ids = turn_record["token_ids"] # List[int]
             logprobs = [lp[token_id].logprob for lp, token_id in zip(logprobs, token_ids)]
             single_problem_train_data.append({
                 "prompt": turn_record["prompt"],

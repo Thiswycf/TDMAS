@@ -14,7 +14,8 @@ max_debug_attempts: 2 # max debug attempts
 ignore_first_evolution: true # ignore the Epoch 0 evolution
 
 # model
-model_name: Qwen3-8B # model name in config/local_llm.yaml
+model_name: Qwen3-4B-Instruct-2507
+# model_name: Qwen3-8B # model name in config/local_llm.yaml
 max_input_tokens: 8192 # tokens
 max_output_tokens: 1024 # tokens
 # max_input_tokens: 24576 # 24K tokens / `raise error` when `less than 20K` in `AIME24`

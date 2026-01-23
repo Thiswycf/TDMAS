@@ -499,7 +499,7 @@ def collate_batch(
         batch_responses.append(sample['response'])
 
         # 处理old_logprobs
-        old_logprobs = sample['logprobs'] # List[Dict[int, Logprob]]
+        old_logprobs = sample['logprobs']
         # 转换为tensor并截断/填充
         old_logprobs_tensor = torch.tensor(old_logprobs, dtype=torch.float32)
         if len(old_logprobs_tensor) > max_new_tokens:
@@ -671,7 +671,7 @@ def main():
         plot_steps=optimize_config.get('plot_steps', 50),
     )
 
-    os.environ["CUDA_VISIBLE_DEVICES"] = LLMManager._allocate_gpus(llm_memory=40.0)["cuda_visible_devices"]
+    os.environ["CUDA_VISIBLE_DEVICES"] = LLMManager._allocate_gpus(llm_memory=21.6)["cuda_visible_devices"] # NOTE: modified
 
     # 加载 local_llm 配置文件
     local_llm_config_path = "config/local_llm.yaml"

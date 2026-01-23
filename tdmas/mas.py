@@ -268,6 +268,7 @@ class Agent:
                 subquestion_scores = parsed_response['subquestion_scores']
                 subquestion_evaluations = parsed_response['subquestion_evaluations']
 
+                sub_tasks_early_return = []
                 sub_tasks = []
                 # 为每个子问题创建或复用下级 Agent（按 id 复用，实现追问）
                 for subq in subquestions:
@@ -302,14 +303,19 @@ class Agent:
                             logger.warning(f"追问的子问题ID {subq['id']} 未被存档（agent 输出越界的子问题ID）")
                             # 这是系统对自己的评价（系统对自己的监督信号）
                             self.record_output_id_score(output_id, 0.0, "supervision")
-                            sub_tasks.append({
-                                "output_id": self.get_next_output_id(),
-                                "answer": "",
-                                "score": 0.0,
-                                "evaluation": f"The sub-question ID {subq['id']} is not archived.",
-                                "final": True,
-                                "reason": "subq_not_archived",
-                            })
+                            sub_tasks_early_return.append(
+                                (
+                                    subq["id"],
+                                    {
+                                        "output_id": self.get_next_output_id(),
+                                        "answer": "",
+                                        "score": 0.0,
+                                        "evaluation": f"The sub-question ID {subq['id']} is not archived.",
+                                        "final": True,
+                                        "reason": "subq_not_archived",
+                                    }
+                                )
+                            )
                             continue
                         
                         subq_source_id = self.subq_id_subq_reply_id_dict[subq["id"]]
@@ -321,14 +327,19 @@ class Agent:
                         logger.warning(f"ID为 {subq['id']} 的子问题被追问，但反馈为空（agent 未评价下级）")
                         # 这是系统对自己的评价（系统对自己的监督信号）
                         self.record_output_id_score(output_id, 0.0, "supervision")
-                        sub_tasks.append({
-                            "output_id": self.get_next_output_id(),
-                            "answer": "",
-                            "score": 0.0,
-                            "evaluation": f"The feedback of sub-question ID {subq['id']} is None.",
-                            "final": True,
-                            "reason": "subq_feedback_none",
-                        })
+                        sub_tasks_early_return.append(
+                            (
+                                subq["id"],
+                                {
+                                    "output_id": self.get_next_output_id(),
+                                    "answer": "",
+                                    "score": 0.0,
+                                    "evaluation": f"The feedback of sub-question ID {subq['id']} is None.",
+                                    "final": True,
+                                    "reason": "subq_feedback_none",
+                                }
+                            )
+                        )
                         continue
                     async def sub_solve(subq_id: int, child_instance: Agent, *args, **kwargs):
                         # Await the solve and bundle id for gathering later
@@ -342,7 +353,7 @@ class Agent:
                         feedback=feedback,
                     ))
 
-                sub_results = await asyncio.gather(*sub_tasks)
+                sub_results = sub_tasks_early_return + (await asyncio.gather(*sub_tasks))
                 
                 # 更新子问题id到子问题回复id的映射
                 for subq_id, resp in sub_results:
@@ -378,9 +389,12 @@ class Agent:
                             f"问题在第 {turn_to_subordinates} 轮循环中未得到有效分解或回答（depth={self.depth}），因为响应被截断。响应文本长度: {len(response_text)}"
                         )
                     self._clear_children()
+                    self.record_output_id_score(source_id, 0.0, "consistency")
                     return {
                         "output_id": output_id,
                         "answer": "",
+                        "score": 0.0,
+                        "evaluation": "Response was truncated because it exceeds the maximum token length. Please try again.",
                         "final": False,
                         "reason": "response_truncated",
                     }
@@ -392,10 +406,13 @@ class Agent:
 
 
         self._clear_children()
-        # 达到最大循环次数或未知状态，返回当前状态
+        # 未知状态
+        self.record_output_id_score(source_id, 0.0, "consistency")
         return {
             "output_id": output_id,
             "answer": "",
+            "score": 0.0,
+            "evaluation": "Unknown state. Please try again.",
             "final": False,
             "reason": "unknown_state",
         }
