@@ -453,6 +453,8 @@ async def run_pipeline(config_path: str = "config/running_config.yaml"):
     if infer_only:
         # 只执行评估
         for epoch in range(start_epoch, end_epoch + 1):
+            if epoch == 0 and config.get('ignore_first_evolution', False):
+                continue
             eval_model_name = build_model_name(
                 base_model_name, dataset, zcp, epoch)
             accuracy, results = await evaluate_model(
@@ -480,17 +482,17 @@ async def run_pipeline(config_path: str = "config/running_config.yaml"):
     else:
         # 完整的pipeline：训练 + 评估
         for epoch in range(start_epoch, end_epoch):
-            _model_name = build_model_name(
-                base_model_name, dataset, zcp, epoch)
-            accuracy, results = await evaluate_model(
-                _model_name,
-                dataset,
-                benchmark,
-                test_data,
-                epoch,
-                config,
-                zcp=zcp
-            )
+            _model_name = build_model_name(base_model_name, dataset, zcp, epoch)
+            if not (epoch == 0 and config.get('ignore_first_evolution', False)):
+                accuracy, results = await evaluate_model(
+                    _model_name,
+                    dataset,
+                    benchmark,
+                    test_data,
+                    epoch,
+                    config,
+                    zcp=zcp
+                )
             await run_training_epoch(
                 config,
                 epoch,

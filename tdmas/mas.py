@@ -291,19 +291,45 @@ class Agent:
                     feedback = (subq_score, subq_evaluation)
                     if subq_score is None or subq_evaluation is None:
                         feedback = None
-                    try:
-                        if subq_score:
-                            # 上级 agent 极小概率会输出越界的子问题ID
-                            assert self.subq_id_subq_reply_id_dict.get(subq["id"]), f"未存档的子问题ID：{subq['id']}（上级 agent 输出越界的子问题ID）"
-                            subq_source_id = self.subq_id_subq_reply_id_dict[subq["id"]]
-                            # 这是自己对子问题回复的评价（上级对下级的监督信号）
-                            self.record_output_id_score(subq_source_id, subq_score, "supervision")
-                        # Wrap child.solve in a coroutine that tracks subq["id"] to prevent 'was never awaited'
-                        elif child.turn_to_superior > 0:
-                            # 上级 agent 极小概率会忘记评价下级，无法避免
-                            raise ValueError(f"ID为 {subq['id']} 的子问题被追问，但反馈为空（上级 agent 未评价下级）")
-                    except ValueError as e:
-                        logger.error(f"subq_id 到 subq_reply_id 的映射失败：{e}")
+                    if child.turn_to_superior == 0 and feedback is not None:
+                        logger.warning(f"子问题ID {subq['id']} 第一次建立，但自己误给反馈（agent 误对自己收到的问题进行评价）：{feedback}")
+                        feedback = None
+                        # 这是系统对自己的评价（系统对自己的监督信号）
+                        self.record_output_id_score(output_id, 0.0, "supervision")
+                    if subq_score: # 追问
+                        # agent 极小概率会输出越界的子问题ID
+                        if not self.subq_id_subq_reply_id_dict.get(subq["id"]):
+                            logger.warning(f"追问的子问题ID {subq['id']} 未被存档（agent 输出越界的子问题ID）")
+                            # 这是系统对自己的评价（系统对自己的监督信号）
+                            self.record_output_id_score(output_id, 0.0, "supervision")
+                            sub_tasks.append({
+                                "output_id": self.get_next_output_id(),
+                                "answer": "",
+                                "score": 0.0,
+                                "evaluation": f"The sub-question ID {subq['id']} is not archived.",
+                                "final": True,
+                                "reason": "subq_not_archived",
+                            })
+                            continue
+                        
+                        subq_source_id = self.subq_id_subq_reply_id_dict[subq["id"]]
+                        # 这是自己对子问题回复的评价（上级对下级的监督信号）
+                        self.record_output_id_score(subq_source_id, subq_score, "supervision")
+                    # Wrap child.solve in a coroutine that tracks subq["id"] to prevent 'was never awaited'
+                    elif child.turn_to_superior > 0:
+                        # agent 极小概率会忘记评价下级，无法避免
+                        logger.warning(f"ID为 {subq['id']} 的子问题被追问，但反馈为空（agent 未评价下级）")
+                        # 这是系统对自己的评价（系统对自己的监督信号）
+                        self.record_output_id_score(output_id, 0.0, "supervision")
+                        sub_tasks.append({
+                            "output_id": self.get_next_output_id(),
+                            "answer": "",
+                            "score": 0.0,
+                            "evaluation": f"The feedback of sub-question ID {subq['id']} is None.",
+                            "final": True,
+                            "reason": "subq_feedback_none",
+                        })
+                        continue
                     async def sub_solve(subq_id: int, child_instance: Agent, *args, **kwargs):
                         # Await the solve and bundle id for gathering later
                         r = await child_instance.solve(*args, **kwargs)
